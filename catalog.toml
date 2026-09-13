@@ -1,0 +1,24 @@
+# Shipped catalog. No machine paths, no personal repos.
+# Your skill list belongs in catalog.local.toml (gitignored).
+# code_root defaults to the parent of this repo. Override with
+# UPDATE_HARNESS_CODE_ROOT or code_root = "{home}/Code"
+
+plugin_hosts = ["grok", "claude"]
+
+[hosts.grok]
+skills = "~/.grok/skills"
+
+[hosts.claude]
+skills = "~/.claude/skills"
+
+[hosts.cursor]
+skills = "~/.cursor/skills"
+
+[hosts.codex]
+skills = "~/.codex/skills"
+
+[[skills]]
+name = "update-harness"
+kind = "link"
+repo = "{root}"
+hosts = ["grok", "claude", "cursor", "codex"]

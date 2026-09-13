@@ -1,0 +1,30 @@
+# Copy rows you need into catalog.local.toml.
+# Last row that names a dest_skill wins.
+
+# plugin_hosts = ["grok", "claude"]
+# code_root = "{home}/Code"
+
+# [[skills]]
+# name = "my-copy-skill"
+# kind = "installer"
+# repo = "{code_root}/my-copy-skill"
+# install_ps1 = "scripts/install.ps1"
+# install_sh = "scripts/install.sh"
+# dest_skills = ["my-copy-skill"]
+# hosts = ["grok", "claude", "cursor"]
+
+# [[skills]]
+# name = "my-command-skill"
+# kind = "command"
+# repo = "{code_root}/my-command-skill"
+# argv = ["{python}", "install.py"]
+# dest_skills = ["my-command-skill"]
+# source_skill_md = "skills/SKILL.md"
+# hosts = ["grok", "claude", "cursor", "codex"]
+
+# [[skills]]
+# name = "my-skill-pack"
+# kind = "link-pack"
+# repo = "{code_root}/my-skill-pack"
+# skills_dir = "skills"
+# hosts = ["grok", "claude", "cursor", "codex"]
