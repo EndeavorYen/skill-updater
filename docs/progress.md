@@ -3,7 +3,8 @@
 as-of: 2026-09-14 Taipei
 owner: EndeavorYen
 line: update-harness
-knife: auto-scan skill and plugin lists (#1)
+knife: idle
+Prior knife: auto-scan skill and plugin lists (#1) — squash-merged https://github.com/EndeavorYen/skill-updater/pull/4
 
 `knife:` names the cut this spine belongs to. `knife: idle` = no named knife; it does **not** mean this line is finished. **Forbidden:** `line: idle` to mean “no knife”. One knife per map.
 
@@ -31,15 +32,15 @@ write-gate:
 | Adversarial | done | independent oracles + claims table + jtm hunt 0 in-scope |
 | Ablation (optional) | unplanned | optional after green |
 | Ship prep | done | commit / push / PR; not merge |
-| Merge gate | current | human squash-merge; then this map |
+| Merge gate | done | squash-merged PR #4; #1 closed |
 
 ## current
 
-Merge gate — human squash-merge; close #1; then this map (`knife: idle` or next named knife).
+none
 
 ## missing
 
-- Merge gate
+none
 
 ## n/a
 
@@ -50,6 +51,7 @@ Merge gate — human squash-merge; close #1; then this map (`knife: idle` or nex
 - Ablation (optional after green)
 - Optional CR (not a spine cell)
 - `scan --json` (global `--json` exists; not a 完成條件)
+- Follow-ups: #2 installer dest_skills; #3 installer dest stale hashes
 
 ## Knife card
 
