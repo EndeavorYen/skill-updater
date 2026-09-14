@@ -3,8 +3,9 @@ name: update-harness
 description: >
   update: refresh local skills and host plugins from catalog.toml.
   Use when the user says update skills, update plugins, update harness,
-  sync skills to grok/claude/cursor/codex, or runs /update-harness.
-  Run the script. Do not copy SKILL.md by hand. Do not rewrite skills.
+  scan skills, scan plugins, sync skills to grok/claude/cursor/codex,
+  or runs /update-harness. Run the script. Do not copy SKILL.md by hand.
+  Do not rewrite skills.
 ---
 
 # update-harness
@@ -25,10 +26,11 @@ The script picks install.ps1 vs install.sh and junction vs symlink.
 <PYTHON> <ROOT>/update.py skills
 <PYTHON> <ROOT>/update.py plugins
 <PYTHON> <ROOT>/update.py all
+<PYTHON> <ROOT>/update.py scan
 ```
 
 Pass the user's extra words through (`--dry-run`, `--only NAME`, `--force`,
-`--json`). No extra words → `status`.
+`--json`, `--write`). No extra words → `status`. Extra words `scan` → `scan`.
 
 Print the script stdout. Stop. Do not open a knife. Personal skill rows go
 in `catalog.local.toml`. Do not put machine paths or private repos in

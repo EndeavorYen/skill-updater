@@ -10,6 +10,9 @@ python3 update.py status
 python3 update.py skills
 python3 update.py plugins
 python3 update.py all
+python3 update.py scan
+python3 update.py scan --write
+python3 update.py scan --write --dry-run
 ```
 
 Windows: `python` if there is no `python3`. `status` is the default. Exit 1 means stale / missing / wrong-target, not a crash.
@@ -20,6 +23,7 @@ The first `skills` run writes `~/.local/bin/update-harness` (`.cmd` on Windows).
 update-harness status
 update-harness skills --dry-run
 update-harness all
+update-harness scan --write --dry-run
 ```
 
 ## Catalog
@@ -47,5 +51,6 @@ Missing grok/claude CLIs are skipped, not a failure.
 
 - `git pull` of source repos
 - rewriting SKILL.md
-- scanning a code tree for new skills
 - deleting a real directory to make a link (`--force` renames it to `.bak` first)
+
+`scan` lists skills under `code_root` and live host skill dirs, plus installed grok/claude plugins. `--write` appends only **new** skill rows to `catalog.local.toml`. It does not rewrite shipped `catalog.toml`.

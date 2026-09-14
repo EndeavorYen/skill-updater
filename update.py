@@ -71,6 +71,22 @@ class Catalog:
     plugin_hosts: tuple[str, ...]
     hosts: dict[str, Host]
     skills: tuple[SkillEntry, ...]
+    source_dir: Path = ROOT
+
+
+@dataclass(frozen=True)
+class ScanHit:
+    name: str
+    kind: Kind
+    path: Path
+    in_catalog: bool
+    repo: Path | None
+
+
+@dataclass(frozen=True)
+class PluginHit:
+    host: str
+    plugin_id: str
 
 
 @dataclass(frozen=True)
@@ -166,8 +182,9 @@ def load_catalog(
 ) -> Catalog:
     base = root or ROOT
     catalog_path = path or (base / CATALOG_NAME)
+    source_dir = catalog_path.parent if path is not None else base
     data = tomllib.loads(catalog_path.read_text(encoding="utf-8"))
-    local_path = base / LOCAL_CATALOG_NAME
+    local_path = source_dir / LOCAL_CATALOG_NAME
     if path is None and local_path.is_file():
         data = merge_catalog_data(data, tomllib.loads(local_path.read_text(encoding="utf-8")))
     code_root = resolve_code_root(data)
@@ -204,7 +221,28 @@ def load_catalog(
         plugin_hosts=tuple(data.get("plugin_hosts") or ()),
         hosts=hosts,
         skills=tuple(skills),
+        source_dir=source_dir,
     )
+
+
+def kind_for_dir(path: Path) -> Kind | None:
+    if not path.is_dir() and not is_reparse_point(path):
+        return None
+    if (path / "scripts" / "install.ps1").is_file() or (path / "scripts" / "install.sh").is_file():
+        return "installer"
+    if (path / "install.py").is_file():
+        return "command"
+    skills_root = path / "skills"
+    if skills_root.is_dir():
+        try:
+            for child in skills_root.iterdir():
+                if child.is_dir() and (child / "SKILL.md").is_file():
+                    return "link-pack"
+        except OSError:
+            pass
+    if (path / "SKILL.md").is_file():
+        return "link"
+    return None
 
 
 def live_hosts(catalog: Catalog) -> dict[str, Host]:
@@ -275,6 +313,299 @@ def claims_for(catalog: Catalog, hosts: dict[str, Host]) -> list[DestClaim]:
                     owner=entry.name,
                 )
     return list(by_key.values())
+
+
+def _under_root(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (OSError, ValueError):
+        c = _canon(path)
+        rc = _canon(root)
+        return c == rc or c.startswith(rc + os.sep)
+
+
+def _catalog_dest_names(catalog: Catalog) -> set[str]:
+    names: set[str] = set()
+    for entry in catalog.skills:
+        names.add(entry.name)
+        names.update(dest_names(entry))
+    return names
+
+
+def scan_skill_hits(catalog: Catalog, hosts: dict[str, Host]) -> tuple[ScanHit, ...]:
+    names = _catalog_dest_names(catalog)
+    scan_roots: list[Path] = []
+    if catalog.code_root.is_dir():
+        scan_roots.append(catalog.code_root)
+    for host in hosts.values():
+        if host.skills.is_dir():
+            scan_roots.append(host.skills)
+
+    def under_any_root(path: Path) -> bool:
+        return any(_under_root(path, root) for root in scan_roots)
+
+    seen: set[str] = set()
+    checkout_repos: list[Path] = []
+    hits: list[ScanHit] = []
+
+    def already_covered(path: Path) -> bool:
+        if _canon(path) in seen:
+            return True
+        return any(_under_root(path, repo) for repo in checkout_repos)
+
+    def mark(path: Path) -> None:
+        seen.add(_canon(path))
+
+    def skip_self(path: Path) -> bool:
+        return same_path(path, ROOT)
+
+    if catalog.code_root.is_dir():
+        try:
+            children = list(catalog.code_root.iterdir())
+        except OSError:
+            children = []
+        for child in children:
+            if skip_self(child):
+                continue
+            resolved = child
+            if is_reparse_point(child):
+                target = link_target(child)
+                if target is None:
+                    continue
+                if not under_any_root(target):
+                    continue
+                else:
+                    resolved = target
+                    if already_covered(resolved):
+                        continue
+            if skip_self(resolved):
+                continue
+            kind = kind_for_dir(resolved)
+            if kind is None:
+                kind = kind_for_dir(child)
+            if kind is None:
+                continue
+            mark(child)
+            mark(resolved)
+            name = child.name
+            repo = resolved if resolved.is_dir() else child
+            if is_reparse_point(child) and not under_any_root(link_target(child) or child):
+                repo = None
+            else:
+                checkout_repos.append(repo)
+                if kind == "link-pack":
+                    for pack_dir in pack_skill_dirs(
+                        SkillEntry(name=name, kind="link-pack", repo=repo, hosts=())
+                    ):
+                        mark(pack_dir)
+            hits.append(
+                ScanHit(
+                    name=name,
+                    kind=kind,
+                    path=child,
+                    in_catalog=name in names,
+                    repo=repo,
+                )
+            )
+
+    for host in hosts.values():
+        if not host.skills.is_dir():
+            continue
+        try:
+            dest_children = list(host.skills.iterdir())
+        except OSError:
+            continue
+        for child in dest_children:
+            if skip_self(child):
+                continue
+            resolved = child
+            if is_reparse_point(child):
+                target = link_target(child)
+                if target is None:
+                    continue
+                resolved = target
+                if already_covered(resolved):
+                    continue
+            elif already_covered(child):
+                continue
+            if skip_self(resolved):
+                continue
+            kind = kind_for_dir(child)
+            if kind is None:
+                kind = kind_for_dir(resolved)
+            if kind is None:
+                continue
+            mark(child)
+            mark(resolved)
+            name = child.name
+            repo: Path | None
+            if is_reparse_point(child):
+                target = link_target(child)
+                if target is not None and _under_root(target, catalog.code_root):
+                    # checkout we can name — but if it is a nested dest, skip duplicate
+                    if already_covered(target) or any(
+                        _under_root(target, repo) for repo in checkout_repos
+                    ):
+                        continue
+                    repo = target if target.parent == catalog.code_root else None
+                else:
+                    repo = None
+            else:
+                repo = None
+            hits.append(
+                ScanHit(
+                    name=name,
+                    kind=kind,
+                    path=child,
+                    in_catalog=name in names,
+                    repo=repo,
+                )
+            )
+    return tuple(hits)
+
+
+def _toml_basic_string(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def overlay_toml(hit: ScanHit, code_root: Path) -> str:
+    repo = hit.repo or hit.path
+    try:
+        rel = repo.resolve().relative_to(code_root.resolve()).as_posix()
+        repo_str = "{code_root}/" + rel
+    except (OSError, ValueError):
+        try:
+            rel = Path(os.path.relpath(repo, code_root)).as_posix()
+            if not rel.startswith(".."):
+                repo_str = "{code_root}/" + rel.replace("\\", "/")
+            else:
+                repo_str = str(repo)
+        except ValueError:
+            repo_str = str(repo)
+    lines = [
+        "[[skills]]",
+        f"name = {_toml_basic_string(hit.name)}",
+        f"kind = {_toml_basic_string(hit.kind)}",
+        f"repo = {_toml_basic_string(repo_str)}",
+    ]
+    if hit.kind == "link-pack":
+        lines.append(f"skills_dir = {_toml_basic_string('skills')}")
+    return "\n".join(lines) + "\n"
+
+
+def _overlay_skill_names(text: str) -> set[str] | None:
+    if not text.strip():
+        return set()
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return None
+    names: set[str] = set()
+    for row in data.get("skills") or []:
+        if isinstance(row, dict) and row.get("name"):
+            names.add(str(row["name"]))
+    return names
+
+
+def write_overlay(
+    hits: Iterable[ScanHit],
+    local_catalog_path: Path,
+    code_root: Path,
+    *,
+    dry_run: bool,
+) -> list[str]:
+    seen_names: set[str] = set()
+    existing = ""
+    if local_catalog_path.is_file():
+        try:
+            existing = local_catalog_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"scan: skip write {local_catalog_path}: {exc}", file=sys.stderr)
+            return []
+        parsed = _overlay_skill_names(existing)
+        if parsed is None:
+            print(f"scan: skip write {local_catalog_path}: invalid overlay TOML", file=sys.stderr)
+            return []
+        seen_names.update(parsed)
+    kept: list[ScanHit] = []
+    for hit in hits:
+        if hit.in_catalog or hit.repo is None:
+            continue
+        if hit.name in seen_names:
+            continue
+        seen_names.add(hit.name)
+        kept.append(hit)
+    blocks = [overlay_toml(hit, code_root) for hit in kept]
+    if dry_run or not blocks:
+        return blocks
+    if existing and not existing.endswith("\n"):
+        existing += "\n"
+    try:
+        local_catalog_path.write_text(existing + "".join(blocks), encoding="utf-8")
+    except OSError as exc:
+        print(f"scan: skip write {local_catalog_path}: {exc}", file=sys.stderr)
+        return []
+    return blocks
+
+
+def _plugin_ids_from_stdout(stdout: str) -> list[str]:
+    if not stdout.strip():
+        return []
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError:
+        return []
+    return claude_plugin_ids(payload)
+
+
+def list_installed_plugins(catalog: Catalog) -> list[PluginHit]:
+    out: list[PluginHit] = []
+    for host_name in catalog.plugin_hosts:
+        if host_name not in ("grok", "claude"):
+            continue
+        if not which(host_name):
+            continue
+        try:
+            listed = subprocess.run(
+                [host_name, "plugin", "list", "--json"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            continue
+        if listed.returncode != 0:
+            continue
+        for plugin_id in _plugin_ids_from_stdout(listed.stdout or ""):
+            out.append(PluginHit(host=host_name, plugin_id=plugin_id))
+    return out
+
+
+def cmd_scan(
+    catalog: Catalog,
+    hosts: dict[str, Host],
+    *,
+    write: bool,
+    dry_run: bool,
+) -> int:
+    hits = scan_skill_hits(catalog, hosts)
+    plugins = list_installed_plugins(catalog)
+    for hit in hits:
+        status = "in-catalog" if hit.in_catalog else "new"
+        print(f"{hit.name}\t{hit.kind}\t{display_path(hit.path)}\t{status}")
+    for plugin in plugins:
+        print(f"{plugin.host}\t{plugin.plugin_id}")
+    if write:
+        overlay_path = catalog.source_dir / LOCAL_CATALOG_NAME
+        blocks = write_overlay(hits, overlay_path, catalog.code_root, dry_run=dry_run)
+        if dry_run:
+            for block in blocks:
+                print(block if block.endswith("\n") else block + "\n", end="")
+        elif blocks and overlay_path.is_file():
+            print(f"wrote {overlay_path}")
+    return 0
 
 
 def sha256_file(path: Path) -> str | None:
@@ -707,10 +1038,11 @@ def build_parser() -> argparse.ArgumentParser:
         "command",
         nargs="?",
         default="status",
-        choices=["status", "skills", "plugins", "all"],
-        help="status (default), skills, plugins, or all",
+        choices=["status", "skills", "plugins", "all", "scan"],
+        help="status (default), skills, plugins, all, or scan",
     )
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--write", action="store_true", help="scan: append new skills to catalog.local.toml")
     p.add_argument("--force", action="store_true", help="rename a real dest dir aside, then link")
     p.add_argument("--only", metavar="NAME", help="one catalog name or dest skill")
     p.add_argument("--json", action="store_true", help="status as JSON")
@@ -724,6 +1056,8 @@ def main(argv: list[str] | None = None) -> int:
     hosts = live_hosts(catalog)
     if args.command == "status":
         return cmd_status(catalog, hosts, as_json=args.json)
+    if args.command == "scan":
+        return cmd_scan(catalog, hosts, write=args.write, dry_run=args.dry_run)
     rc = 0
     if args.command in ("skills", "all"):
         rc |= apply_skills(
