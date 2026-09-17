@@ -77,11 +77,31 @@ def test_last_writer_wins_dest_claim(tmp_path: Path) -> None:
     assert ("musk-algorithm", "musk-algorithm") in claims
 
 
-def test_classify_stale_and_ok(tmp_path: Path) -> None:
+def test_classify_command_stale_and_ok(tmp_path: Path) -> None:
     repo = tmp_path / "gentle"
     dest_root = tmp_path / "skills"
     write_skill(repo, "new")
     write_skill(dest_root / "gentle-grill-me", "old")
+    hosts = {"grok": update.Host("grok", dest_root)}
+    claim = update.DestClaim(
+        host="grok",
+        dest_name="gentle-grill-me",
+        source_md=repo / "SKILL.md",
+        method="command",
+        source_dir=repo,
+        owner="gentle-grill-me",
+    )
+    row = update.classify(claim, hosts)
+    assert row.state == "stale"
+    (dest_root / "gentle-grill-me" / "SKILL.md").write_text("new", encoding="utf-8")
+    assert update.classify(claim, hosts).state == "ok"
+
+
+def test_classify_installer_ok_when_dest_skill_md_differs(tmp_path: Path) -> None:
+    repo = tmp_path / "gentle"
+    dest_root = tmp_path / "skills"
+    write_skill(repo, "checkout")
+    write_skill(dest_root / "gentle-grill-me", "github-copy")
     hosts = {"grok": update.Host("grok", dest_root)}
     claim = update.DestClaim(
         host="grok",
@@ -92,9 +112,7 @@ def test_classify_stale_and_ok(tmp_path: Path) -> None:
         owner="gentle-grill-me",
     )
     row = update.classify(claim, hosts)
-    assert row.state == "stale"
-    (dest_root / "gentle-grill-me" / "SKILL.md").write_text("new", encoding="utf-8")
-    assert update.classify(claim, hosts).state == "ok"
+    assert row.state == "ok"
 
 
 def test_classify_missing(tmp_path: Path) -> None:
