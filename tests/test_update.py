@@ -605,6 +605,22 @@ def test_inferred_dest_skills_includes_pack_children(tmp_path: Path) -> None:
     assert update.inferred_dest_skills(repo, "pack-installer") == ("pack-item",)
 
 
+def test_inferred_dest_skills_skips_skills_dir_skill_md(tmp_path: Path) -> None:
+    repo = tmp_path / "my-command-skill"
+    repo.mkdir()
+    (repo / "install.py").write_text("print(1)\n", encoding="utf-8")
+    write_skill(repo / "skills", "---\nname: my-command-skill\n---\nbody\n")
+    assert update.inferred_dest_skills(repo, "my-command-skill") == ()
+    hit = update.ScanHit(
+        name="my-command-skill",
+        kind="command",
+        path=repo,
+        in_catalog=False,
+        repo=repo,
+    )
+    assert "dest_skills" not in update.overlay_toml(hit, tmp_path)
+
+
 def test_scan_write_installer_dests_are_not_missing(tmp_path: Path) -> None:
     code_root = tmp_path / "code"
     repo = code_root / "musk-algorithm-skill"

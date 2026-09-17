@@ -521,7 +521,7 @@ def inferred_dest_skills(repo: Path, catalog_name: str) -> tuple[str, ...]:
         except OSError:
             children = []
         for child in children:
-            if child.name in {".git", "scripts"}:
+            if child.name in {".git", "scripts", "skills"}:
                 continue
             if is_reparse_point(child) or not child.is_dir():
                 continue
