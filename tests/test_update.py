@@ -4,6 +4,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 import update
 
 
@@ -882,6 +884,7 @@ def test_parser_write_flag() -> None:
 
 
 def test_main_scan_dispatch_does_not_apply(monkeypatch) -> None:
+    monkeypatch.setattr(update, "write_shim", lambda: None)
     monkeypatch.setattr(
         update,
         "apply_skills",
@@ -1021,6 +1024,278 @@ def test_write_overlay_skips_invalid_toml(tmp_path: Path, capsys) -> None:
     assert local_path.read_text(encoding="utf-8") == original
     err = capsys.readouterr().err.lower()
     assert "skip write" in err or "invalid" in err
+
+
+def test_parser_help_lists_commands_and_quick_start() -> None:
+    help_text = update.build_parser().format_help()
+    assert "Inspect current link/installer health" in help_text
+    assert "Discover skills under code_root" in help_text
+    assert "Sync/link skill repos" in help_text
+    assert "Update host CLI plugins" in help_text
+    assert "Sync all skills and update host plugins" in help_text
+    assert "one-command scan --write then all" in help_text
+    assert "Write ~/.local/bin/update-harness" in help_text
+    assert "Quick Start:" in help_text
+    assert "update-harness scan --write" in help_text
+    assert "update-harness all" in help_text
+    assert "update-harness status" in help_text
+    assert "update-harness sync" in help_text
+
+
+def test_parser_write_flag_is_scan_only() -> None:
+    parser = update.build_parser()
+    usage = parser.format_help().split("positional arguments:", 1)[0]
+    assert "--write" not in usage
+    sub = next(a for a in parser._actions if getattr(a, "choices", None))
+    scan_help = sub.choices["scan"].format_help()
+    assert "--write" in scan_help
+    assert "catalog.local.toml" in scan_help
+    with pytest.raises(SystemExit):
+        parser.parse_args(["status", "--write"])
+
+
+def test_parser_dry_run_has_help() -> None:
+    help_text = update.build_parser().format_help()
+    dry_lines = [line for line in help_text.splitlines() if "--dry-run" in line]
+    assert dry_lines
+    assert any(line.strip() != "--dry-run" and len(line.strip()) > len("--dry-run") for line in dry_lines)
+
+
+def test_parser_sync_and_install_shim_choices() -> None:
+    parser = update.build_parser()
+    assert parser.parse_args([]).command == "status"
+    assert parser.parse_args(["sync"]).command == "sync"
+    assert parser.parse_args(["install-shim"]).command == "install-shim"
+    args = parser.parse_args(["scan", "--write", "--dry-run"])
+    assert args.command == "scan"
+    assert args.write is True
+    assert args.dry_run is True
+
+
+def test_cmd_status_prints_hint_when_missing(tmp_path: Path, capsys) -> None:
+    repo = tmp_path / "repo"
+    write_skill(repo, "x")
+    dest_root = tmp_path / "skills"
+    dest_root.mkdir()
+    catalog = update.Catalog(
+        code_root=tmp_path,
+        plugin_hosts=(),
+        hosts={"grok": update.Host("grok", dest_root)},
+        skills=(
+            update.SkillEntry(
+                name="repo",
+                kind="link",
+                repo=repo,
+                hosts=("grok",),
+            ),
+        ),
+        source_dir=tmp_path,
+    )
+    code = update.cmd_status(catalog, catalog.hosts, as_json=False)
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "Hint: run 'update-harness scan --write' followed by 'update-harness all'" in out
+
+
+def test_cmd_status_json_omits_hint(tmp_path: Path, capsys) -> None:
+    repo = tmp_path / "repo"
+    write_skill(repo, "x")
+    dest_root = tmp_path / "skills"
+    dest_root.mkdir()
+    catalog = update.Catalog(
+        code_root=tmp_path,
+        plugin_hosts=(),
+        hosts={"grok": update.Host("grok", dest_root)},
+        skills=(
+            update.SkillEntry(
+                name="repo",
+                kind="link",
+                repo=repo,
+                hosts=("grok",),
+            ),
+        ),
+        source_dir=tmp_path,
+    )
+    code = update.cmd_status(catalog, catalog.hosts, as_json=True)
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "Hint:" not in out
+    assert '"state": "missing"' in out
+
+
+def test_cmd_status_ok_omits_hint(tmp_path: Path, capsys) -> None:
+    repo = tmp_path / "repo"
+    write_skill(repo, "x")
+    dest_root = tmp_path / "skills"
+    write_skill(dest_root / "repo", "x")
+    catalog = update.Catalog(
+        code_root=tmp_path,
+        plugin_hosts=(),
+        hosts={"grok": update.Host("grok", dest_root)},
+        skills=(
+            update.SkillEntry(
+                name="repo",
+                kind="installer",
+                repo=repo,
+                hosts=("grok",),
+                dest_skills=("repo",),
+            ),
+        ),
+        source_dir=tmp_path,
+    )
+    code = update.cmd_status(catalog, catalog.hosts, as_json=False)
+    assert code == 0
+    assert "Hint:" not in capsys.readouterr().out
+
+
+def test_overlay_needs_scan_write_when_missing_or_new(tmp_path: Path) -> None:
+    code_root = tmp_path / "code"
+    write_skill(code_root / "fresh-skill", "x")
+    catalog = _scan_catalog(tmp_path, code_root=code_root)
+    assert update.overlay_needs_scan_write(catalog, catalog.hosts) is True
+    (tmp_path / "catalog.local.toml").write_text(
+        '[[skills]]\nname = "fresh-skill"\nkind = "link"\nrepo = "{code_root}/fresh-skill"\n',
+        encoding="utf-8",
+    )
+    loaded = update.Catalog(
+        code_root=code_root,
+        plugin_hosts=(),
+        hosts=catalog.hosts,
+        skills=(
+            update.SkillEntry(
+                name="fresh-skill",
+                kind="link",
+                repo=code_root / "fresh-skill",
+                hosts=("grok",),
+            ),
+        ),
+        source_dir=tmp_path,
+    )
+    assert update.overlay_needs_scan_write(loaded, loaded.hosts) is False
+    write_skill(code_root / "another-skill", "y")
+    assert update.overlay_needs_scan_write(loaded, loaded.hosts) is True
+
+
+def test_cmd_sync_scans_then_all_when_needed(tmp_path: Path, monkeypatch) -> None:
+    catalog = _scan_catalog(tmp_path)
+    calls: list[str] = []
+    monkeypatch.setattr(update, "overlay_needs_scan_write", lambda *a, **kw: True)
+    monkeypatch.setattr(
+        update,
+        "cmd_scan",
+        lambda *a, **kw: calls.append(f"scan:{kw.get('write')}") or 0,
+    )
+    monkeypatch.setattr(update, "load_catalog", lambda *a, **kw: catalog)
+    monkeypatch.setattr(update, "live_hosts", lambda c: c.hosts)
+    monkeypatch.setattr(update, "apply_skills", lambda *a, **kw: calls.append("skills") or 0)
+    monkeypatch.setattr(update, "apply_plugins", lambda *a, **kw: calls.append("plugins") or 0)
+    monkeypatch.setattr(update, "cmd_status", lambda *a, **kw: calls.append("status") or 0)
+    code = update.cmd_sync(catalog, catalog.hosts, dry_run=False, force=False, only=None)
+    assert code == 0
+    assert calls == ["scan:True", "skills", "plugins", "status"]
+
+
+def test_cmd_sync_skips_scan_when_overlay_current(tmp_path: Path, monkeypatch) -> None:
+    catalog = _scan_catalog(tmp_path)
+    calls: list[str] = []
+    monkeypatch.setattr(update, "overlay_needs_scan_write", lambda *a, **kw: False)
+    monkeypatch.setattr(
+        update,
+        "cmd_scan",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("scan")),
+    )
+    monkeypatch.setattr(update, "apply_skills", lambda *a, **kw: calls.append("skills") or 0)
+    monkeypatch.setattr(update, "apply_plugins", lambda *a, **kw: calls.append("plugins") or 0)
+    monkeypatch.setattr(update, "cmd_status", lambda *a, **kw: calls.append("status") or 0)
+    code = update.cmd_sync(catalog, catalog.hosts, dry_run=False, force=False, only=None)
+    assert code == 0
+    assert calls == ["skills", "plugins", "status"]
+
+
+def test_main_install_shim_skips_catalog(monkeypatch) -> None:
+    called: list[str] = []
+    monkeypatch.setattr(update, "write_shim", lambda: called.append("shim"))
+    monkeypatch.setattr(
+        update,
+        "load_catalog",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("catalog")),
+    )
+    assert update.main(["install-shim"]) == 0
+    assert called == ["shim"]
+
+
+def test_main_install_shim_dry_run_skips_write(monkeypatch) -> None:
+    monkeypatch.setattr(
+        update,
+        "write_shim",
+        lambda: (_ for _ in ()).throw(AssertionError("shim")),
+    )
+    monkeypatch.setattr(
+        update,
+        "load_catalog",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("catalog")),
+    )
+    assert update.main(["install-shim", "--dry-run"]) == 0
+
+
+def test_main_sync_dispatch(monkeypatch) -> None:
+    catalog = update.Catalog(
+        code_root=Path("."),
+        plugin_hosts=(),
+        hosts={},
+        skills=(),
+    )
+    called: list[str] = []
+    monkeypatch.setattr(update, "write_shim", lambda: None)
+    monkeypatch.setattr(update, "load_catalog", lambda *a, **kw: catalog)
+    monkeypatch.setattr(update, "live_hosts", lambda c: c.hosts)
+    monkeypatch.setattr(
+        update,
+        "cmd_sync",
+        lambda *a, **kw: called.append("sync") or 0,
+    )
+    monkeypatch.setattr(
+        update,
+        "apply_skills",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("skills")),
+    )
+    assert update.main(["sync"]) == 0
+    assert called == ["sync"]
+
+
+def test_main_status_writes_shim(monkeypatch) -> None:
+    called: list[str] = []
+    catalog = update.Catalog(
+        code_root=Path("."),
+        plugin_hosts=(),
+        hosts={},
+        skills=(),
+    )
+    monkeypatch.setattr(update, "write_shim", lambda: called.append("shim"))
+    monkeypatch.setattr(update, "load_catalog", lambda *a, **kw: catalog)
+    monkeypatch.setattr(update, "live_hosts", lambda c: c.hosts)
+    monkeypatch.setattr(update, "cmd_status", lambda *a, **kw: called.append("status") or 0)
+    assert update.main(["status"]) == 0
+    assert called == ["shim", "status"]
+
+
+def test_main_dry_run_skips_shim(monkeypatch) -> None:
+    catalog = update.Catalog(
+        code_root=Path("."),
+        plugin_hosts=(),
+        hosts={},
+        skills=(),
+    )
+    monkeypatch.setattr(
+        update,
+        "write_shim",
+        lambda: (_ for _ in ()).throw(AssertionError("shim")),
+    )
+    monkeypatch.setattr(update, "load_catalog", lambda *a, **kw: catalog)
+    monkeypatch.setattr(update, "live_hosts", lambda c: c.hosts)
+    monkeypatch.setattr(update, "apply_skills", lambda *a, **kw: 0)
+    monkeypatch.setattr(update, "cmd_status", lambda *a, **kw: 0)
+    assert update.main(["skills", "--dry-run"]) == 0
 
 
 def test_cmd_scan_oserror_does_not_print_wrote(

@@ -6,24 +6,24 @@ Windows / macOS / Linux. Python 3.11+ (or 3.10 + `tomli`).
 ```bash
 git clone https://github.com/EndeavorYen/skill-updater.git
 cd skill-updater
-python3 update.py status
-python3 update.py skills
-python3 update.py plugins
-python3 update.py all
-python3 update.py scan
+python3 update.py --help
+python3 update.py install-shim
 python3 update.py scan --write
-python3 update.py scan --write --dry-run
+python3 update.py all
+python3 update.py status
+python3 update.py sync
 ```
 
-Windows: `python` if there is no `python3`. `status` is the default. Exit 1 means stale / missing / wrong-target, not a crash.
+Windows: `python` if there is no `python3`. `status` is the default. Exit 1 means stale / missing / wrong-target, not a crash; `status` then prints a next-step hint.
 
-The first `skills` run writes `~/.local/bin/update-harness` (`.cmd` on Windows). If that directory is on PATH:
+Any non-`--dry-run` command writes `~/.local/bin/update-harness` (`.cmd` on Windows), or run `install-shim` first. If that directory is on PATH:
 
 ```bash
-update-harness status
+update-harness scan --write   # discover skills, create catalog.local.toml
+update-harness all            # link/install skills and update host plugins
+update-harness status         # check health
+update-harness sync           # scan --write if needed, then all
 update-harness skills --dry-run
-update-harness all
-update-harness scan --write --dry-run
 ```
 
 ## Catalog

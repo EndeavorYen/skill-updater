@@ -27,10 +27,14 @@ The script picks install.ps1 vs install.sh and junction vs symlink.
 <PYTHON> <ROOT>/update.py plugins
 <PYTHON> <ROOT>/update.py all
 <PYTHON> <ROOT>/update.py scan
+<PYTHON> <ROOT>/update.py scan --write
+<PYTHON> <ROOT>/update.py sync
+<PYTHON> <ROOT>/update.py install-shim
 ```
 
 Pass the user's extra words through (`--dry-run`, `--only NAME`, `--force`,
 `--json`, `--write`). No extra words → `status`. Extra words `scan` → `scan`.
+`sync` is scan `--write` when the overlay is empty or new skills exist, then `all`.
 
 Print the script stdout. Stop. Do not open a knife. Personal skill rows go
 in `catalog.local.toml`. Do not put machine paths or private repos in

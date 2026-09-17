@@ -1096,6 +1096,67 @@ def apply_plugins(catalog: Catalog, *, dry_run: bool) -> int:
     return 1 if failed else 0
 
 
+STATUS_HINT = (
+    "Hint: run 'update-harness scan --write' followed by 'update-harness all'"
+)
+
+HELP_EPILOG = """\
+Commands:
+  status        Inspect current link/installer health across hosts.
+  scan          Discover skills under code_root and host dirs (use --write to save to overlay).
+  skills        Sync/link skill repos to all configured hosts.
+  plugins       Update host CLI plugins (grok, claude).
+  all           Sync all skills and update host plugins in one command.
+  sync          one-command scan --write then all when the overlay is empty or new skills exist.
+  install-shim  Write ~/.local/bin/update-harness (.cmd on Windows).
+
+Quick Start:
+  update-harness scan --write   # Discover skills & initialize catalog.local.toml
+  update-harness all            # Update all skills and host plugins
+  update-harness status         # Check synchronization health
+  update-harness sync           # Zero-friction: scan --write if needed, then all
+"""
+
+
+def overlay_needs_scan_write(catalog: Catalog, hosts: dict[str, Host]) -> bool:
+    overlay = catalog.source_dir / LOCAL_CATALOG_NAME
+    if not overlay.is_file():
+        return True
+    try:
+        text = overlay.read_text(encoding="utf-8")
+    except OSError:
+        return True
+    names = _overlay_skill_names(text)
+    if not names:
+        return True
+    return any(not hit.in_catalog and hit.repo is not None for hit in scan_skill_hits(catalog, hosts))
+
+
+def cmd_sync(
+    catalog: Catalog,
+    hosts: dict[str, Host],
+    *,
+    dry_run: bool,
+    force: bool,
+    only: str | None,
+    catalog_path: Path | None = None,
+) -> int:
+    if overlay_needs_scan_write(catalog, hosts):
+        cmd_scan(catalog, hosts, write=True, dry_run=dry_run)
+        if not dry_run:
+            catalog = load_catalog(catalog_path)
+            hosts = live_hosts(catalog)
+    rc = 0
+    rc |= apply_skills(catalog, hosts, only=only, dry_run=dry_run, force=force)
+    if only:
+        print("plugins: --only ignored")
+    rc |= apply_plugins(catalog, dry_run=dry_run)
+    if not dry_run:
+        print()
+        cmd_status(catalog, hosts, as_json=False)
+    return rc
+
+
 def cmd_status(catalog: Catalog, hosts: dict[str, Host], *, as_json: bool) -> int:
     rows = status_rows(catalog, hosts)
     if as_json:
@@ -1109,37 +1170,98 @@ def cmd_status(catalog: Catalog, hosts: dict[str, Host], *, as_json: bool) -> in
         print(f"skills: {summary or '0'}")
         print(f"plugin hosts: {', '.join(catalog.plugin_hosts) or '(none)'}")
     bad = [r for r in rows if r.state not in ("ok",)]
+    if bad and not as_json:
+        print()
+        print(STATUS_HINT)
     return 1 if bad else 0
 
 
+def _common_flag_parser() -> argparse.ArgumentParser:
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="do not write files, links, overlay, or run installers",
+    )
+    common.add_argument("--force", action="store_true", help="rename a real dest dir aside, then link")
+    common.add_argument("--only", metavar="NAME", help="one catalog name or dest skill")
+    common.add_argument("--json", action="store_true", help="status as JSON")
+    common.add_argument("--catalog", type=Path, help="catalog.toml path")
+    return common
+
+
+class _Parser(argparse.ArgumentParser):
+    def parse_args(self, args=None, namespace=None):  # type: ignore[override]
+        ns = super().parse_args(args, namespace)
+        if getattr(ns, "command", None) is None:
+            ns.command = "status"
+        return ns
+
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        description="Refresh local skills and host plugins from catalog.toml"
+    common = _common_flag_parser()
+    p = _Parser(
+        description="Refresh local skills and host plugins from catalog.toml",
+        epilog=HELP_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        parents=[common],
     )
-    p.add_argument(
-        "command",
-        nargs="?",
-        default="status",
-        choices=["status", "skills", "plugins", "all", "scan"],
-        help="status (default), skills, plugins, all, or scan",
+    p.set_defaults(command="status", write=False)
+    sub = p.add_subparsers(dest="command", metavar="COMMAND")
+    sub.add_parser(
+        "status",
+        parents=[common],
+        help="Inspect current link/installer health across hosts.",
     )
-    p.add_argument("--dry-run", action="store_true")
-    p.add_argument("--write", action="store_true", help="scan: append new skills to catalog.local.toml")
-    p.add_argument("--force", action="store_true", help="rename a real dest dir aside, then link")
-    p.add_argument("--only", metavar="NAME", help="one catalog name or dest skill")
-    p.add_argument("--json", action="store_true", help="status as JSON")
-    p.add_argument("--catalog", type=Path, help="catalog.toml path")
+    scan = sub.add_parser(
+        "scan",
+        parents=[common],
+        help="Discover skills under code_root and host dirs.",
+    )
+    scan.add_argument(
+        "--write",
+        action="store_true",
+        help="append new skills to catalog.local.toml",
+    )
+    sub.add_parser("skills", parents=[common], help="Sync/link skill repos to all configured hosts.")
+    sub.add_parser("plugins", parents=[common], help="Update host CLI plugins (grok, claude).")
+    sub.add_parser("all", parents=[common], help="Sync all skills and update host plugins in one command.")
+    sub.add_parser(
+        "sync",
+        parents=[common],
+        help="one-command scan --write then all when the overlay is empty or new skills exist.",
+    )
+    sub.add_parser(
+        "install-shim",
+        parents=[common],
+        help="Write ~/.local/bin/update-harness (.cmd on Windows).",
+    )
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "install-shim":
+        if not args.dry_run:
+            write_shim()
+        return 0
+    if not args.dry_run:
+        write_shim()
     catalog = load_catalog(args.catalog)
     hosts = live_hosts(catalog)
     if args.command == "status":
         return cmd_status(catalog, hosts, as_json=args.json)
     if args.command == "scan":
         return cmd_scan(catalog, hosts, write=args.write, dry_run=args.dry_run)
+    if args.command == "sync":
+        return cmd_sync(
+            catalog,
+            hosts,
+            dry_run=args.dry_run,
+            force=args.force,
+            only=args.only,
+            catalog_path=args.catalog,
+        )
     rc = 0
     if args.command in ("skills", "all"):
         rc |= apply_skills(
