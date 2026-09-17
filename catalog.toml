@@ -17,8 +17,14 @@ skills = "~/.cursor/skills"
 [hosts.codex]
 skills = "~/.codex/skills"
 
+[hosts.gemini]
+skills = "~/.gemini/config/skills"
+
+[hosts.antigravity]
+skills = "~/.gemini/config/skills"
+
 [[skills]]
 name = "update-harness"
 kind = "link"
 repo = "{root}"
-hosts = ["grok", "claude", "cursor", "codex"]
+hosts = ["grok", "claude", "cursor", "codex", "gemini", "antigravity"]
