@@ -548,6 +548,101 @@ def test_overlay_toml_formatting(tmp_path: Path) -> None:
     assert "hosts" not in command
 
 
+def test_overlay_toml_installer_infers_multi_dest_skills(tmp_path: Path) -> None:
+    repo = tmp_path / "musk-algorithm-skill"
+    write_skill(repo, "---\nname: musk-algorithm\n---\nalgo\n")
+    write_skill(repo / "musk-backlog", "nested-backlog\n")
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "scripts" / "install.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+    hit = update.ScanHit(
+        name="musk-algorithm-skill",
+        kind="installer",
+        path=repo,
+        in_catalog=False,
+        repo=repo,
+    )
+    text = update.overlay_toml(hit, tmp_path)
+    assert 'dest_skills = ["musk-algorithm", "musk-backlog"]' in text
+    assert "hosts" not in text
+
+
+def test_overlay_toml_omits_dest_skills_when_same_as_name(tmp_path: Path) -> None:
+    repo = tmp_path / "gamma"
+    write_skill(repo, "---\nname: gamma\n---\nbody\n")
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "scripts" / "install.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+    hit = update.ScanHit(
+        name="gamma",
+        kind="installer",
+        path=repo,
+        in_catalog=False,
+        repo=repo,
+    )
+    assert "dest_skills" not in update.overlay_toml(hit, tmp_path)
+
+
+def test_overlay_toml_command_infers_nested_dest_skills(tmp_path: Path) -> None:
+    repo = tmp_path / "delta"
+    repo.mkdir()
+    (repo / "install.py").write_text("print(1)\n", encoding="utf-8")
+    write_skill(repo / "copied-skill", "nested\n")
+    hit = update.ScanHit(
+        name="delta",
+        kind="command",
+        path=repo,
+        in_catalog=False,
+        repo=repo,
+    )
+    text = update.overlay_toml(hit, tmp_path)
+    assert 'dest_skills = ["copied-skill"]' in text
+
+
+def test_inferred_dest_skills_includes_pack_children(tmp_path: Path) -> None:
+    repo = tmp_path / "pack-installer"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "scripts" / "install.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+    write_skill(repo / "skills" / "pack-item", "pack\n")
+    assert update.inferred_dest_skills(repo, "pack-installer") == ("pack-item",)
+
+
+def test_scan_write_installer_dests_are_not_missing(tmp_path: Path) -> None:
+    code_root = tmp_path / "code"
+    repo = code_root / "musk-algorithm-skill"
+    write_skill(repo, "---\nname: musk-algorithm\n---\nalgo\n")
+    write_skill(repo / "musk-backlog", "backlog\n")
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "scripts" / "install.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+    grok_skills = tmp_path / "grok-skills"
+    write_skill(grok_skills / "musk-algorithm", "---\nname: musk-algorithm\n---\nalgo\n")
+    write_skill(grok_skills / "musk-backlog", "backlog\n")
+    catalog = _scan_catalog(
+        tmp_path,
+        code_root=code_root,
+        hosts={"grok": update.Host("grok", grok_skills)},
+    )
+    overlay = tmp_path / "catalog.local.toml"
+    hits = update.scan_skill_hits(catalog, catalog.hosts)
+    update.write_overlay(hits, overlay, code_root, dry_run=False)
+    shipped = tmp_path / "catalog.toml"
+    shipped.write_text(
+        f"""
+plugin_hosts = []
+code_root = "{code_root.as_posix()}"
+[hosts.grok]
+skills = "{grok_skills.as_posix()}"
+""",
+        encoding="utf-8",
+    )
+    loaded = update.load_catalog(root=tmp_path)
+    entry = next(s for s in loaded.skills if s.name == "musk-algorithm-skill")
+    assert update.dest_names(entry) == ["musk-algorithm", "musk-backlog"]
+    rows = [r for r in update.status_rows(loaded, loaded.hosts) if r.owner == "musk-algorithm-skill"]
+    assert {r.dest: r.state for r in rows} == {
+        "musk-algorithm": "ok",
+        "musk-backlog": "ok",
+    }
+
+
 def test_write_overlay_dry_run(tmp_path: Path) -> None:
     local_path = tmp_path / "catalog.local.toml"
     repo = tmp_path / "new-skill"

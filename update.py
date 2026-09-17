@@ -470,6 +470,79 @@ def _toml_basic_string(value: str) -> str:
     return f'"{escaped}"'
 
 
+def skill_md_frontmatter_name(md: Path) -> str | None:
+    try:
+        text = md.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    if not text.startswith("---"):
+        return None
+    rest = text[3:]
+    if rest.startswith("\r\n"):
+        rest = rest[2:]
+    elif rest.startswith("\n"):
+        rest = rest[1:]
+    else:
+        return None
+    idx = rest.find("\n---")
+    if idx == -1:
+        return None
+    for raw_line in rest[:idx].splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or not line.startswith("name:"):
+            continue
+        value = line[5:].strip()
+        if value.startswith("#"):
+            return None
+        if not (value.startswith('"') or value.startswith("'")) and " #" in value:
+            value = value.split(" #", 1)[0].strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        return value or None
+    return None
+
+
+def inferred_dest_skills(repo: Path, catalog_name: str) -> tuple[str, ...]:
+    dests: list[str] = []
+    seen: set[str] = set()
+
+    def add(name: str) -> None:
+        if name and name not in seen:
+            seen.add(name)
+            dests.append(name)
+
+    root_md = repo / "SKILL.md"
+    frontmatter = skill_md_frontmatter_name(root_md)
+    if frontmatter:
+        add(frontmatter)
+    if repo.is_dir():
+        try:
+            children = sorted(repo.iterdir(), key=lambda p: p.name.lower())
+        except OSError:
+            children = []
+        for child in children:
+            if child.name in {".git", "scripts"}:
+                continue
+            if is_reparse_point(child) or not child.is_dir():
+                continue
+            if (child / "SKILL.md").is_file():
+                add(child.name)
+        skills_root = repo / "skills"
+        if skills_root.is_dir() and not is_reparse_point(skills_root):
+            try:
+                pack_children = sorted(skills_root.iterdir(), key=lambda p: p.name.lower())
+            except OSError:
+                pack_children = []
+            for child in pack_children:
+                if is_reparse_point(child) or not child.is_dir():
+                    continue
+                if (child / "SKILL.md").is_file():
+                    add(child.name)
+    if not dests or dests == [catalog_name]:
+        return ()
+    return tuple(dests)
+
+
 def overlay_toml(hit: ScanHit, code_root: Path) -> str:
     repo = hit.repo or hit.path
     try:
@@ -492,6 +565,11 @@ def overlay_toml(hit: ScanHit, code_root: Path) -> str:
     ]
     if hit.kind == "link-pack":
         lines.append(f"skills_dir = {_toml_basic_string('skills')}")
+    if hit.kind in ("installer", "command"):
+        dests = inferred_dest_skills(repo, hit.name)
+        if dests:
+            inner = ", ".join(_toml_basic_string(name) for name in dests)
+            lines.append(f"dest_skills = [{inner}]")
     return "\n".join(lines) + "\n"
 
 
