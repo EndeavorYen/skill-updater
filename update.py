@@ -696,6 +696,10 @@ def classify(claim: DestClaim, hosts: dict[str, Host]) -> Row:
     dest_md = dest / "SKILL.md"
     if not dest_md.is_file():
         return Row(claim.host, claim.dest_name, claim.owner, method, "missing")
+    # Installers often clone GitHub into a temp tree and copy that, so dest
+    # SKILL.md can differ from the local checkout even after a successful run.
+    if method == "installer":
+        return Row(claim.host, claim.dest_name, claim.owner, method, "ok")
     src_hash = sha256_file(claim.source_md)
     dst_hash = sha256_file(dest_md)
     if src_hash and dst_hash and src_hash == dst_hash:

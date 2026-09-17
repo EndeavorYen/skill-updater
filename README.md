@@ -40,7 +40,7 @@ Missing grok/claude CLIs are skipped, not a failure.
 
 ## Kinds
 
-- **installer** — Windows: `scripts/install.ps1`. macOS / Linux: `scripts/install.sh`. If only one file exists, that one runs (`pwsh` or Git Bash as fallback).
+- **installer** — Windows: `scripts/install.ps1`. macOS / Linux: `scripts/install.sh`. If only one file exists, that one runs (`pwsh` or Git Bash as fallback). `status` treats dest `SKILL.md` as present or missing only; it does not hash against the local checkout, because installers often copy a GitHub clone rather than `{code_root}`.
 - **command** — argv, `{python}` is `sys.executable`.
 - **link / link-pack** — Windows junction, macOS / Linux symlink. `junction` / `junction-pack` still parse.
 - **plugins** — `grok plugin update`; Claude marketplace update then each installed plugin.
