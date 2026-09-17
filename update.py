@@ -225,24 +225,56 @@ def load_catalog(
     )
 
 
+def _pack_skill_present(path: Path) -> bool:
+    skills_root = path / "skills"
+    if not skills_root.is_dir():
+        return False
+    try:
+        for child in skills_root.iterdir():
+            if child.is_dir() and (child / "SKILL.md").is_file():
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def nested_same_name_skill(path: Path) -> Path | None:
+    nested = path / path.name
+    if nested.is_dir() and (nested / "SKILL.md").is_file():
+        return nested
+    return None
+
+
+def is_git_worktree(path: Path) -> bool:
+    git = path / ".git"
+    try:
+        return git.is_file()
+    except OSError:
+        return False
+
+
 def kind_for_dir(path: Path) -> Kind | None:
     if not path.is_dir() and not is_reparse_point(path):
         return None
+    if _pack_skill_present(path):
+        return "link-pack"
     if (path / "scripts" / "install.ps1").is_file() or (path / "scripts" / "install.sh").is_file():
         return "installer"
     if (path / "install.py").is_file():
         return "command"
-    skills_root = path / "skills"
-    if skills_root.is_dir():
-        try:
-            for child in skills_root.iterdir():
-                if child.is_dir() and (child / "SKILL.md").is_file():
-                    return "link-pack"
-        except OSError:
-            pass
     if (path / "SKILL.md").is_file():
         return "link"
+    if nested_same_name_skill(path) is not None:
+        return "link"
     return None
+
+
+def scan_repo_for(path: Path, kind: Kind) -> Path:
+    if kind == "link" and not (path / "SKILL.md").is_file():
+        nested = nested_same_name_skill(path)
+        if nested is not None:
+            return nested
+    return path
 
 
 def live_hosts(catalog: Catalog) -> dict[str, Host]:
@@ -368,6 +400,8 @@ def scan_skill_hits(catalog: Catalog, hosts: dict[str, Host]) -> tuple[ScanHit, 
         for child in children:
             if skip_self(child):
                 continue
+            if is_git_worktree(child):
+                continue
             resolved = child
             if is_reparse_point(child):
                 target = link_target(child)
@@ -381,6 +415,8 @@ def scan_skill_hits(catalog: Catalog, hosts: dict[str, Host]) -> tuple[ScanHit, 
                         continue
             if skip_self(resolved):
                 continue
+            if is_git_worktree(resolved):
+                continue
             kind = kind_for_dir(resolved)
             if kind is None:
                 kind = kind_for_dir(child)
@@ -390,6 +426,8 @@ def scan_skill_hits(catalog: Catalog, hosts: dict[str, Host]) -> tuple[ScanHit, 
             mark(resolved)
             name = child.name
             repo = resolved if resolved.is_dir() else child
+            repo = scan_repo_for(repo, kind)
+            mark(repo)
             if is_reparse_point(child) and not under_any_root(link_target(child) or child):
                 repo = None
             else:

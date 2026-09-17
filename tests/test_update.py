@@ -235,6 +235,8 @@ def test_shipped_catalog_is_generic() -> None:
     assert "sesstalk" not in text
     assert "workflow-ex" not in text
     assert "shuohao" not in text
+    assert loaded.hosts["gemini"].skills == Path.home() / ".gemini" / "config" / "skills"
+    assert loaded.hosts["antigravity"].skills == Path.home() / ".gemini" / "config" / "skills"
 
 
 def test_local_overlay_merges_after_shipped(tmp_path: Path) -> None:
@@ -420,6 +422,14 @@ def test_kind_for_dir(tmp_path: Path) -> None:
     d_unrelated.mkdir()
     (d_unrelated / "README.md").write_text("x\n", encoding="utf-8")
     (d_unrelated / "setup.py").write_text("x\n", encoding="utf-8")
+    d_pack_and_sh = tmp_path / "d_pack_and_sh"
+    (d_pack_and_sh / "scripts").mkdir(parents=True)
+    (d_pack_and_sh / "scripts" / "install.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+    write_skill(d_pack_and_sh / "skills" / "sub-a", "pack")
+    d_nested = tmp_path / "archify"
+    write_skill(d_nested / "archify", "nested")
+    d_nested_mismatch = tmp_path / "other-repo"
+    write_skill(d_nested_mismatch / "not-the-repo-name", "nested")
 
     assert update.kind_for_dir(d_ps1) == "installer"
     assert update.kind_for_dir(d_sh) == "installer"
@@ -430,6 +440,9 @@ def test_kind_for_dir(tmp_path: Path) -> None:
     assert update.kind_for_dir(d_prec2) == "command"
     assert update.kind_for_dir(d_empty) is None
     assert update.kind_for_dir(d_unrelated) is None
+    assert update.kind_for_dir(d_pack_and_sh) == "link-pack"
+    assert update.kind_for_dir(d_nested) == "link"
+    assert update.kind_for_dir(d_nested_mismatch) is None
 
 
 def _scan_catalog(
@@ -504,6 +517,35 @@ def test_scan_self_root_exclusion(tmp_path: Path, monkeypatch) -> None:
     catalog = _scan_catalog(tmp_path, code_root=code_root)
     hits = update.scan_skill_hits(catalog, catalog.hosts)
     assert not any(h.name == "skill-updater" and not h.in_catalog for h in hits)
+
+
+def test_scan_skips_git_worktree_children(tmp_path: Path) -> None:
+    code_root = tmp_path / "code"
+    write_skill(code_root / "real-skill", "ok")
+    worktree = code_root / "real-skill-worktree"
+    write_skill(worktree, "dup")
+    (worktree / ".git").write_text("gitdir: /tmp/fake.git\n", encoding="utf-8")
+    catalog = _scan_catalog(tmp_path, code_root=code_root)
+    hits = {h.name: h for h in update.scan_skill_hits(catalog, catalog.hosts)}
+    assert "real-skill" in hits
+    assert "real-skill-worktree" not in hits
+
+
+def test_scan_nested_repo_name_skill_overlay(tmp_path: Path) -> None:
+    code_root = tmp_path / "code"
+    write_skill(code_root / "archify" / "archify", "nested")
+    catalog = _scan_catalog(tmp_path, code_root=code_root)
+    hits = {h.name: h for h in update.scan_skill_hits(catalog, catalog.hosts)}
+    hit = hits["archify"]
+    assert hit.kind == "link"
+    assert hit.repo == code_root / "archify" / "archify"
+    text = update.overlay_toml(hit, code_root)
+    assert text == (
+        "[[skills]]\n"
+        'name = "archify"\n'
+        'kind = "link"\n'
+        'repo = "{code_root}/archify/archify"\n'
+    )
 
 
 def test_scan_host_real_dir_unmapped(tmp_path: Path) -> None:
