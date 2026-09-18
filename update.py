@@ -327,6 +327,115 @@ def dest_names(entry: SkillEntry) -> list[str]:
     return [entry.name]
 
 
+def git_repo_root(path: Path) -> Path | None:
+    try:
+        current = path.parent if path.is_file() else path
+        current = current.resolve()
+    except OSError:
+        return None
+    for candidate in (current, *current.parents):
+        marker = candidate / ".git"
+        try:
+            if marker.exists():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def catalog_git_roots(catalog: Catalog, only: str | None = None) -> list[Path]:
+    seen: set[str] = set()
+    roots: list[Path] = []
+    for entry in catalog.skills:
+        if only and entry.name != only and only not in dest_names(entry):
+            continue
+        root = git_repo_root(entry.repo)
+        if root is None:
+            continue
+        key = os.path.normcase(str(root))
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(root)
+    return roots
+
+
+def _git(root: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
+def _git_text(proc: subprocess.CompletedProcess[str]) -> str:
+    return ((proc.stdout or "") + (proc.stderr or "")).strip()
+
+
+def _pull_one_repo(root: Path, *, label: str, dry_run: bool) -> int:
+    status = _git(root, ["status", "--porcelain"])
+    if status.returncode != 0:
+        print(f"pull: warn {label}: git status failed ({_git_text(status)})")
+        return 1
+    if status.stdout.strip():
+        print(f"pull: skip {label}: uncommitted changes in {display_path(root)}")
+        return 0
+    upstream = _git(root, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
+    if upstream.returncode != 0:
+        if dry_run:
+            print(f"dry-run: (cd {root}) git fetch")
+            print(f"pull: {label}: no upstream; would fetch remotes")
+            return 0
+        print(f"$ (cd {root}) git fetch")
+        fetched = _git(root, ["fetch"])
+        if fetched.returncode != 0:
+            print(f"pull: warn {label}: git fetch failed ({_git_text(fetched)})")
+            return 1
+        print(f"pull: {label}: no upstream; fetched remotes")
+        return 0
+    if dry_run:
+        print(f"dry-run: (cd {root}) git pull --ff-only")
+        return 0
+    print(f"$ (cd {root}) git pull --ff-only")
+    pulled = _git(root, ["pull", "--ff-only"])
+    extra = _git_text(pulled)
+    if pulled.returncode != 0:
+        print(f"pull: warn {label}: {extra or 'git pull --ff-only failed'}")
+        return 1
+    if extra:
+        print(extra)
+    return 0
+
+
+def apply_pull(catalog: Catalog, *, dry_run: bool, only: str | None = None) -> int:
+    if which("git") is None:
+        print("pull: git not on PATH; skip")
+        return 0
+    failed = 0
+    seen: set[str] = set()
+    selected = False
+    for entry in catalog.skills:
+        if only and entry.name != only and only not in dest_names(entry):
+            continue
+        selected = True
+        root = git_repo_root(entry.repo)
+        if root is None:
+            print(f"pull: {entry.name}: not a git repo ({display_path(entry.repo)})")
+            continue
+        key = os.path.normcase(str(root))
+        if key in seen:
+            continue
+        seen.add(key)
+        failed += _pull_one_repo(root, label=entry.name, dry_run=dry_run)
+    if only and not selected:
+        print(f"pull: no catalog skill matching {only!r}")
+    return 1 if failed else 0
+
+
 def claims_for(catalog: Catalog, hosts: dict[str, Host]) -> list[DestClaim]:
     by_key: dict[tuple[str, str], DestClaim] = {}
     for entry in catalog.skills:
@@ -1144,12 +1253,14 @@ Commands:
   scan          Discover skills under code_root and host dirs (use --write to save to overlay).
   skills        Sync/link skill repos to all configured hosts.
   plugins       Update host CLI plugins (grok, claude).
+  pull          Fast-forward catalog skill git repos from their remotes.
   all           Sync all skills and update host plugins in one command.
   sync          one-command scan --write then all when the overlay is empty or new skills exist.
   install-shim  Write ~/.local/bin/update-harness (.cmd on Windows).
 
 Quick Start:
   update-harness scan --write   # Discover skills & initialize catalog.local.toml
+  update-harness pull           # Fast-forward catalog skill git repos
   update-harness all            # Update all skills and host plugins
   update-harness status         # Check synchronization health
   update-harness sync           # Zero-friction: scan --write if needed, then all
@@ -1178,6 +1289,7 @@ def cmd_sync(
     force: bool,
     only: str | None,
     catalog_path: Path | None = None,
+    no_pull: bool = False,
 ) -> int:
     if overlay_needs_scan_write(catalog, hosts):
         cmd_scan(catalog, hosts, write=True, dry_run=dry_run)
@@ -1185,6 +1297,8 @@ def cmd_sync(
             catalog = load_catalog(catalog_path)
             hosts = live_hosts(catalog)
     rc = 0
+    if not no_pull:
+        rc |= apply_pull(catalog, dry_run=dry_run, only=only)
     rc |= apply_skills(catalog, hosts, only=only, dry_run=dry_run, force=force)
     if only:
         print("plugins: --only ignored")
@@ -1223,6 +1337,11 @@ def _common_flag_parser() -> argparse.ArgumentParser:
     )
     common.add_argument("--force", action="store_true", help="rename a real dest dir aside, then link")
     common.add_argument("--only", metavar="NAME", help="one catalog name or dest skill")
+    common.add_argument(
+        "--no-pull",
+        action="store_true",
+        help="skip remote git pull on all/sync (offline)",
+    )
     common.add_argument("--json", action="store_true", help="status as JSON")
     common.add_argument("--catalog", type=Path, help="catalog.toml path")
     return common
@@ -1263,6 +1382,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub.add_parser("skills", parents=[common], help="Sync/link skill repos to all configured hosts.")
     sub.add_parser("plugins", parents=[common], help="Update host CLI plugins (grok, claude).")
+    sub.add_parser(
+        "pull",
+        parents=[common],
+        help="Fast-forward catalog skill git repos from their remotes.",
+    )
     sub.add_parser("all", parents=[common], help="Sync all skills and update host plugins in one command.")
     sub.add_parser(
         "sync",
@@ -1299,8 +1423,13 @@ def main(argv: list[str] | None = None) -> int:
             force=args.force,
             only=args.only,
             catalog_path=args.catalog,
+            no_pull=args.no_pull,
         )
     rc = 0
+    if args.command == "pull":
+        return apply_pull(catalog, dry_run=args.dry_run, only=args.only)
+    if args.command == "all" and not args.no_pull:
+        rc |= apply_pull(catalog, dry_run=args.dry_run, only=args.only)
     if args.command in ("skills", "all"):
         rc |= apply_skills(
             catalog, hosts, only=args.only, dry_run=args.dry_run, force=args.force

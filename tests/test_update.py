@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -1076,6 +1077,7 @@ def test_parser_help_lists_commands_and_quick_start() -> None:
     assert "Update host CLI plugins" in help_text
     assert "Sync all skills and update host plugins" in help_text
     assert "one-command scan --write then all" in help_text
+    assert "Fast-forward catalog skill git repos" in help_text
     assert "Write ~/.local/bin/update-harness" in help_text
     assert "Quick Start:" in help_text
     assert "update-harness scan --write" in help_text
@@ -1229,12 +1231,13 @@ def test_cmd_sync_scans_then_all_when_needed(tmp_path: Path, monkeypatch) -> Non
     )
     monkeypatch.setattr(update, "load_catalog", lambda *a, **kw: catalog)
     monkeypatch.setattr(update, "live_hosts", lambda c: c.hosts)
+    monkeypatch.setattr(update, "apply_pull", lambda *a, **kw: calls.append("pull") or 0)
     monkeypatch.setattr(update, "apply_skills", lambda *a, **kw: calls.append("skills") or 0)
     monkeypatch.setattr(update, "apply_plugins", lambda *a, **kw: calls.append("plugins") or 0)
     monkeypatch.setattr(update, "cmd_status", lambda *a, **kw: calls.append("status") or 0)
     code = update.cmd_sync(catalog, catalog.hosts, dry_run=False, force=False, only=None)
     assert code == 0
-    assert calls == ["scan:True", "skills", "plugins", "status"]
+    assert calls == ["scan:True", "pull", "skills", "plugins", "status"]
 
 
 def test_cmd_sync_skips_scan_when_overlay_current(tmp_path: Path, monkeypatch) -> None:
@@ -1246,12 +1249,13 @@ def test_cmd_sync_skips_scan_when_overlay_current(tmp_path: Path, monkeypatch) -
         "cmd_scan",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("scan")),
     )
+    monkeypatch.setattr(update, "apply_pull", lambda *a, **kw: calls.append("pull") or 0)
     monkeypatch.setattr(update, "apply_skills", lambda *a, **kw: calls.append("skills") or 0)
     monkeypatch.setattr(update, "apply_plugins", lambda *a, **kw: calls.append("plugins") or 0)
     monkeypatch.setattr(update, "cmd_status", lambda *a, **kw: calls.append("status") or 0)
     code = update.cmd_sync(catalog, catalog.hosts, dry_run=False, force=False, only=None)
     assert code == 0
-    assert calls == ["skills", "plugins", "status"]
+    assert calls == ["pull", "skills", "plugins", "status"]
 
 
 def test_main_install_shim_skips_catalog(monkeypatch) -> None:
@@ -1362,3 +1366,285 @@ def test_cmd_scan_oserror_does_not_print_wrote(
     assert "wrote" not in captured.out
     assert "denied" in captured.err or "skip write" in captured.err.lower()
     assert local_path.read_text(encoding="utf-8") == "# keep\n"
+
+
+def _run_git(cwd: Path, *args: str) -> None:
+    env = os.environ.copy()
+    env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+    env["GIT_CONFIG_SYSTEM"] = "/dev/null"
+    subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
+def _init_git_repo(path: Path, *, text: str = "hello") -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "README").write_text(text, encoding="utf-8")
+    _run_git(path, "init", "-b", "main")
+    _run_git(path, "config", "user.email", "test@example.com")
+    _run_git(path, "config", "user.name", "Test")
+    _run_git(path, "add", ".")
+    _run_git(path, "commit", "-m", "init")
+    return path
+
+
+def _catalog_with_skills(tmp_path: Path, *entries: update.SkillEntry) -> update.Catalog:
+    dest_root = tmp_path / "skills"
+    dest_root.mkdir(exist_ok=True)
+    return update.Catalog(
+        code_root=tmp_path,
+        plugin_hosts=(),
+        hosts={"grok": update.Host("grok", dest_root)},
+        skills=entries,
+        source_dir=tmp_path,
+    )
+
+
+def test_git_repo_root_walks_up_from_nested_skill(tmp_path: Path) -> None:
+    root = _init_git_repo(tmp_path / "archify")
+    nested = root / "archify"
+    nested.mkdir()
+    (nested / "SKILL.md").write_text("x\n", encoding="utf-8")
+    assert update.git_repo_root(nested) == root.resolve()
+    assert update.git_repo_root(nested / "SKILL.md") == root.resolve()
+
+
+def test_catalog_git_roots_dedupes_and_honors_only(tmp_path: Path) -> None:
+    alpha = _init_git_repo(tmp_path / "alpha")
+    nested = alpha / "nested-skill"
+    nested.mkdir()
+    beta = _init_git_repo(tmp_path / "beta")
+    catalog = _catalog_with_skills(
+        tmp_path,
+        update.SkillEntry(name="alpha", kind="link", repo=alpha, hosts=("grok",)),
+        update.SkillEntry(name="nested", kind="link", repo=nested, hosts=("grok",)),
+        update.SkillEntry(name="beta", kind="link", repo=beta, hosts=("grok",)),
+    )
+    roots = update.catalog_git_roots(catalog)
+    assert [p.resolve() for p in roots] == [alpha.resolve(), beta.resolve()]
+    only_beta = update.catalog_git_roots(catalog, only="beta")
+    assert [p.resolve() for p in only_beta] == [beta.resolve()]
+
+
+def test_apply_pull_fast_forwards_upstream(tmp_path: Path, capsys) -> None:
+    remote = tmp_path / "remote.git"
+    remote.mkdir()
+    _run_git(remote, "init", "--bare", "-b", "main")
+    local = tmp_path / "local"
+    subprocess.run(
+        ["git", "clone", str(remote), str(local)],
+        check=True,
+        capture_output=True,
+        env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"},
+    )
+    _run_git(local, "config", "user.email", "test@example.com")
+    _run_git(local, "config", "user.name", "Test")
+    (local / "README").write_text("one\n", encoding="utf-8")
+    _run_git(local, "add", ".")
+    _run_git(local, "commit", "-m", "one")
+    _run_git(local, "push", "-u", "origin", "main")
+    other = tmp_path / "other"
+    subprocess.run(
+        ["git", "clone", str(remote), str(other)],
+        check=True,
+        capture_output=True,
+        env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"},
+    )
+    _run_git(other, "config", "user.email", "test@example.com")
+    _run_git(other, "config", "user.name", "Test")
+    (other / "README").write_text("two\n", encoding="utf-8")
+    _run_git(other, "add", ".")
+    _run_git(other, "commit", "-m", "two")
+    _run_git(other, "push")
+    catalog = _catalog_with_skills(
+        tmp_path,
+        update.SkillEntry(name="local", kind="link", repo=local, hosts=("grok",)),
+    )
+    assert update.apply_pull(catalog, dry_run=False) == 0
+    out = capsys.readouterr().out
+    assert "pull --ff-only" in out
+    assert (local / "README").read_text(encoding="utf-8") == "two\n"
+
+
+def test_apply_pull_skips_dirty_and_notes_no_upstream(tmp_path: Path, capsys) -> None:
+    dirty = _init_git_repo(tmp_path / "dirty", text="clean\n")
+    (dirty / "README").write_text("dirty\n", encoding="utf-8")
+    lone = _init_git_repo(tmp_path / "lone")
+    catalog = _catalog_with_skills(
+        tmp_path,
+        update.SkillEntry(name="dirty", kind="link", repo=dirty, hosts=("grok",)),
+        update.SkillEntry(name="lone", kind="link", repo=lone, hosts=("grok",)),
+    )
+    assert update.apply_pull(catalog, dry_run=False) == 0
+    out = capsys.readouterr().out.lower()
+    assert "uncommitted" in out or "dirty" in out
+    assert "no upstream" in out or "no tracking" in out
+    assert (dirty / "README").read_text(encoding="utf-8") == "dirty\n"
+
+
+def test_apply_pull_dry_run_does_not_fetch_or_merge(tmp_path: Path, capsys) -> None:
+    remote = tmp_path / "remote.git"
+    remote.mkdir()
+    _run_git(remote, "init", "--bare", "-b", "main")
+    local = tmp_path / "local"
+    subprocess.run(
+        ["git", "clone", str(remote), str(local)],
+        check=True,
+        capture_output=True,
+        env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"},
+    )
+    _run_git(local, "config", "user.email", "test@example.com")
+    _run_git(local, "config", "user.name", "Test")
+    (local / "README").write_text("one\n", encoding="utf-8")
+    _run_git(local, "add", ".")
+    _run_git(local, "commit", "-m", "one")
+    _run_git(local, "push", "-u", "origin", "main")
+    other = tmp_path / "other"
+    subprocess.run(
+        ["git", "clone", str(remote), str(other)],
+        check=True,
+        capture_output=True,
+        env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"},
+    )
+    _run_git(other, "config", "user.email", "test@example.com")
+    _run_git(other, "config", "user.name", "Test")
+    (other / "README").write_text("two\n", encoding="utf-8")
+    _run_git(other, "add", ".")
+    _run_git(other, "commit", "-m", "two")
+    _run_git(other, "push")
+    catalog = _catalog_with_skills(
+        tmp_path,
+        update.SkillEntry(name="local", kind="link", repo=local, hosts=("grok",)),
+    )
+    assert update.apply_pull(catalog, dry_run=True) == 0
+    out = capsys.readouterr().out
+    assert "dry-run:" in out
+    assert (local / "README").read_text(encoding="utf-8") == "one\n"
+
+
+def test_apply_pull_warns_and_continues_on_divergence(tmp_path: Path, capsys) -> None:
+    remote = tmp_path / "remote.git"
+    remote.mkdir()
+    _run_git(remote, "init", "--bare", "-b", "main")
+    first = tmp_path / "first"
+    subprocess.run(
+        ["git", "clone", str(remote), str(first)],
+        check=True,
+        capture_output=True,
+        env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"},
+    )
+    _run_git(first, "config", "user.email", "test@example.com")
+    _run_git(first, "config", "user.name", "Test")
+    (first / "README").write_text("base\n", encoding="utf-8")
+    _run_git(first, "add", ".")
+    _run_git(first, "commit", "-m", "base")
+    _run_git(first, "push", "-u", "origin", "main")
+    second = tmp_path / "second"
+    subprocess.run(
+        ["git", "clone", str(remote), str(second)],
+        check=True,
+        capture_output=True,
+        env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"},
+    )
+    _run_git(second, "config", "user.email", "test@example.com")
+    _run_git(second, "config", "user.name", "Test")
+    (first / "README").write_text("local-only\n", encoding="utf-8")
+    _run_git(first, "add", ".")
+    _run_git(first, "commit", "-m", "local-only")
+    (second / "README").write_text("remote-only\n", encoding="utf-8")
+    _run_git(second, "add", ".")
+    _run_git(second, "commit", "-m", "remote-only")
+    _run_git(second, "push")
+    ok = _init_git_repo(tmp_path / "ok")
+    catalog = _catalog_with_skills(
+        tmp_path,
+        update.SkillEntry(name="diverged", kind="link", repo=first, hosts=("grok",)),
+        update.SkillEntry(name="ok", kind="link", repo=ok, hosts=("grok",)),
+    )
+    code = update.apply_pull(catalog, dry_run=False)
+    assert code == 1
+    out = capsys.readouterr().out.lower()
+    assert "warn" in out or "fail" in out or "not possible" in out or "diverg" in out
+    assert "no upstream" in out or "no tracking" in out
+    assert (first / "README").read_text(encoding="utf-8") == "local-only\n"
+
+
+def test_parser_no_pull_and_pull_command() -> None:
+    parser = update.build_parser()
+    assert parser.parse_args(["pull"]).command == "pull"
+    args = parser.parse_args(["all", "--no-pull", "--dry-run"])
+    assert args.no_pull is True
+    assert args.dry_run is True
+    assert parser.parse_args(["all"]).no_pull is False
+
+
+def test_cmd_sync_no_pull_skips_git(tmp_path: Path, monkeypatch) -> None:
+    catalog = _scan_catalog(tmp_path)
+    calls: list[str] = []
+    monkeypatch.setattr(update, "overlay_needs_scan_write", lambda *a, **kw: False)
+    monkeypatch.setattr(
+        update,
+        "apply_pull",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("pull")),
+    )
+    monkeypatch.setattr(update, "apply_skills", lambda *a, **kw: calls.append("skills") or 0)
+    monkeypatch.setattr(update, "apply_plugins", lambda *a, **kw: calls.append("plugins") or 0)
+    monkeypatch.setattr(update, "cmd_status", lambda *a, **kw: calls.append("status") or 0)
+    code = update.cmd_sync(
+        catalog, catalog.hosts, dry_run=False, force=False, only=None, no_pull=True
+    )
+    assert code == 0
+    assert calls == ["skills", "plugins", "status"]
+
+
+def test_main_all_pulls_before_skills(monkeypatch) -> None:
+    catalog = update.Catalog(code_root=Path("."), plugin_hosts=(), hosts={}, skills=())
+    called: list[str] = []
+    monkeypatch.setattr(update, "write_shim", lambda: None)
+    monkeypatch.setattr(update, "load_catalog", lambda *a, **kw: catalog)
+    monkeypatch.setattr(update, "live_hosts", lambda c: c.hosts)
+    monkeypatch.setattr(update, "apply_pull", lambda *a, **kw: called.append("pull") or 0)
+    monkeypatch.setattr(update, "apply_skills", lambda *a, **kw: called.append("skills") or 0)
+    monkeypatch.setattr(update, "apply_plugins", lambda *a, **kw: called.append("plugins") or 0)
+    monkeypatch.setattr(update, "cmd_status", lambda *a, **kw: called.append("status") or 0)
+    assert update.main(["all"]) == 0
+    assert called == ["pull", "skills", "plugins", "status"]
+
+
+def test_main_all_no_pull_skips_git(monkeypatch) -> None:
+    catalog = update.Catalog(code_root=Path("."), plugin_hosts=(), hosts={}, skills=())
+    called: list[str] = []
+    monkeypatch.setattr(update, "write_shim", lambda: None)
+    monkeypatch.setattr(update, "load_catalog", lambda *a, **kw: catalog)
+    monkeypatch.setattr(update, "live_hosts", lambda c: c.hosts)
+    monkeypatch.setattr(
+        update,
+        "apply_pull",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("pull")),
+    )
+    monkeypatch.setattr(update, "apply_skills", lambda *a, **kw: called.append("skills") or 0)
+    monkeypatch.setattr(update, "apply_plugins", lambda *a, **kw: called.append("plugins") or 0)
+    monkeypatch.setattr(update, "cmd_status", lambda *a, **kw: called.append("status") or 0)
+    assert update.main(["all", "--no-pull"]) == 0
+    assert called == ["skills", "plugins", "status"]
+
+
+def test_main_pull_dispatch(monkeypatch) -> None:
+    catalog = update.Catalog(code_root=Path("."), plugin_hosts=(), hosts={}, skills=())
+    called: list[str] = []
+    monkeypatch.setattr(update, "write_shim", lambda: None)
+    monkeypatch.setattr(update, "load_catalog", lambda *a, **kw: catalog)
+    monkeypatch.setattr(update, "live_hosts", lambda c: c.hosts)
+    monkeypatch.setattr(update, "apply_pull", lambda *a, **kw: called.append("pull") or 0)
+    monkeypatch.setattr(
+        update,
+        "apply_skills",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("skills")),
+    )
+    assert update.main(["pull", "--only", "alpha", "--dry-run"]) == 0
+    assert called == ["pull"]
