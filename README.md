@@ -9,6 +9,7 @@ cd skill-updater
 python3 update.py --help
 python3 update.py install-shim
 python3 update.py scan --write
+python3 update.py pull
 python3 update.py all
 python3 update.py status
 python3 update.py sync
@@ -20,10 +21,12 @@ Any non-`--dry-run` command writes `~/.local/bin/update-harness` (`.cmd` on Wind
 
 ```bash
 update-harness scan --write   # discover skills, create catalog.local.toml
-update-harness all            # link/install skills and update host plugins
+update-harness pull           # fast-forward catalog skill git repos
+update-harness all            # pull, then link/install skills and update host plugins
 update-harness status         # check health
 update-harness sync           # scan --write if needed, then all
 update-harness skills --dry-run
+update-harness all --no-pull  # skip git pull (offline)
 ```
 
 ## Catalog
@@ -47,9 +50,10 @@ Missing grok/claude CLIs are skipped, not a failure.
 
 `GROK_HOME` / `HERMES_HOME` win over `~/.grok` / `~/.hermes` when set.
 
+`all` and `sync` pull catalog skill git repos first (`git pull --ff-only` when the branch tracks `@{upstream}`). Use `--no-pull` offline. Repos with uncommitted changes, no upstream, or a failed fast-forward are skipped with a warning; other repos and host plugins still update. `pull` does the same git step alone. `--only NAME` limits pull to that catalog name or dest skill. Nested `{code_root}/archify/archify` walks up to the git root and each root is pulled once.
+
 ## Not this tool
 
-- `git pull` of source repos
 - rewriting SKILL.md
 - deleting a real directory to make a link (`--force` renames it to `.bak` first)
 
