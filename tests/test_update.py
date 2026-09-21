@@ -1648,3 +1648,182 @@ def test_main_pull_dispatch(monkeypatch) -> None:
     )
     assert update.main(["pull", "--only", "alpha", "--dry-run"]) == 0
     assert called == ["pull"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="posix install.sh fixture")
+def test_installer_does_not_write_through_foreign_symlink(tmp_path: Path) -> None:
+    checkout = tmp_path / "git-collabration-skill"
+    write_skill(checkout, "checkout-body")
+    pack_dir = checkout / ".git" / "objects" / "pack"
+    pack_dir.mkdir(parents=True)
+    pack = pack_dir / "foo.pack"
+    pack.write_text("pack-from-checkout", encoding="utf-8")
+    pack.chmod(0o444)
+
+    cache = tmp_path / "awt" / ".cache" / "source-packages" / "git-collaboration"
+    write_skill(cache, "cache-body")
+    cache_pack_dir = cache / ".git" / "objects" / "pack"
+    cache_pack_dir.mkdir(parents=True)
+    (cache_pack_dir / "foo.pack").write_text("pack-from-cache", encoding="utf-8")
+    owned_src = tmp_path / "awt" / "skills" / "delta-presentation"
+    write_skill(owned_src, "present")
+
+    grok_skills = tmp_path / "grok-skills"
+    grok_skills.mkdir()
+    dest_link = grok_skills / "git-collaboration"
+    dest_link.symlink_to(checkout)
+
+    install_sh = tmp_path / "awt" / "scripts" / "install.sh"
+    install_sh.parent.mkdir(parents=True, exist_ok=True)
+    install_sh.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                f'DEST="{grok_skills / "git-collaboration"}"',
+                f'OWNED="{grok_skills / "delta-presentation"}"',
+                f'CACHE="{cache}"',
+                f'OWNED_SRC="{owned_src}"',
+                'mkdir -p "$DEST" "$OWNED"',
+                'cp -a "$CACHE"/. "$DEST"/',
+                'cp -a "$OWNED_SRC"/. "$OWNED"/',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    install_sh.chmod(0o755)
+
+    catalog = update.Catalog(
+        code_root=tmp_path,
+        plugin_hosts=(),
+        hosts={"grok": update.Host("grok", grok_skills)},
+        skills=(
+            update.SkillEntry(
+                name="agent-workflow-toolkit",
+                kind="installer",
+                repo=tmp_path / "awt",
+                hosts=("grok",),
+                dest_skills=("delta-presentation",),
+                install_sh="scripts/install.sh",
+            ),
+            update.SkillEntry(
+                name="git-collaboration",
+                kind="link",
+                repo=checkout,
+                hosts=("grok",),
+            ),
+        ),
+    )
+
+    code = update.apply_skills(catalog, catalog.hosts, only=None, dry_run=False, force=False)
+    assert code == 0
+    assert dest_link.is_symlink()
+    assert dest_link.resolve() == checkout.resolve()
+    assert (checkout / "SKILL.md").read_text(encoding="utf-8") == "checkout-body"
+    assert pack.read_text(encoding="utf-8") == "pack-from-checkout"
+    assert (grok_skills / "delta-presentation" / "SKILL.md").read_text(
+        encoding="utf-8"
+    ) == "present"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="posix install.sh fixture")
+def test_installer_replaces_foreign_real_dir_with_catalog_link(tmp_path: Path) -> None:
+    checkout = tmp_path / "git-collabration-skill"
+    write_skill(checkout, "checkout-body")
+    cache = tmp_path / "awt" / ".cache" / "source-packages" / "git-collaboration"
+    write_skill(cache, "cache-body")
+    grok_skills = tmp_path / "grok-skills"
+    grok_skills.mkdir()
+    dest = grok_skills / "git-collaboration"
+
+    install_sh = tmp_path / "awt" / "scripts" / "install.sh"
+    install_sh.parent.mkdir(parents=True)
+    install_sh.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                f'DEST="{dest}"',
+                f'CACHE="{cache}"',
+                'mkdir -p "$DEST"',
+                'cp -a "$CACHE"/. "$DEST"/',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    install_sh.chmod(0o755)
+
+    catalog = update.Catalog(
+        code_root=tmp_path,
+        plugin_hosts=(),
+        hosts={"grok": update.Host("grok", grok_skills)},
+        skills=(
+            update.SkillEntry(
+                name="agent-workflow-toolkit",
+                kind="installer",
+                repo=tmp_path / "awt",
+                hosts=("grok",),
+                dest_skills=("delta-presentation",),
+                install_sh="scripts/install.sh",
+            ),
+            update.SkillEntry(
+                name="git-collaboration",
+                kind="link",
+                repo=checkout,
+                hosts=("grok",),
+            ),
+        ),
+    )
+
+    code = update.apply_skills(catalog, catalog.hosts, only=None, dry_run=False, force=False)
+    assert code == 0
+    assert dest.is_symlink()
+    assert dest.resolve() == checkout.resolve()
+    assert (checkout / "SKILL.md").read_text(encoding="utf-8") == "checkout-body"
+    assert (dest / "SKILL.md").read_text(encoding="utf-8") == "checkout-body"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="posix install.sh fixture")
+def test_installer_dry_run_does_not_unlink_foreign_dest(tmp_path: Path, capsys) -> None:
+    checkout = tmp_path / "git-collabration-skill"
+    write_skill(checkout, "checkout-body")
+    grok_skills = tmp_path / "grok-skills"
+    grok_skills.mkdir()
+    dest_link = grok_skills / "git-collaboration"
+    dest_link.symlink_to(checkout)
+    (tmp_path / "awt" / "scripts").mkdir(parents=True)
+    (tmp_path / "awt" / "scripts" / "install.sh").write_text(
+        "#!/usr/bin/env bash\nexit 0\n", encoding="utf-8"
+    )
+
+    catalog = update.Catalog(
+        code_root=tmp_path,
+        plugin_hosts=(),
+        hosts={"grok": update.Host("grok", grok_skills)},
+        skills=(
+            update.SkillEntry(
+                name="agent-workflow-toolkit",
+                kind="installer",
+                repo=tmp_path / "awt",
+                hosts=("grok",),
+                dest_skills=("delta-presentation",),
+                install_sh="scripts/install.sh",
+            ),
+            update.SkillEntry(
+                name="git-collaboration",
+                kind="link",
+                repo=checkout,
+                hosts=("grok",),
+            ),
+        ),
+    )
+
+    code = update.apply_skills(catalog, catalog.hosts, only=None, dry_run=True, force=False)
+    out = capsys.readouterr().out
+    assert code == 0
+    assert dest_link.is_symlink()
+    assert dest_link.resolve() == checkout.resolve()
+    assert "dry-run: shield" in out
+    assert "dry-run: restore" in out

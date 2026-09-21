@@ -1115,12 +1115,65 @@ def write_shim() -> None:
     print(f"wrote {shim}")
 
 
+def foreign_claims_for(
+    catalog: Catalog, entry: SkillEntry, host_name: str
+) -> list[DestClaim]:
+    return [
+        claim
+        for claim in claims_for(catalog, catalog.hosts)
+        if claim.host == host_name and claim.owner != entry.name
+    ]
+
+
+def unlink_foreign_skill_links(
+    catalog: Catalog,
+    entry: SkillEntry,
+    host: Host,
+    *,
+    dry_run: bool,
+) -> None:
+    for claim in foreign_claims_for(catalog, entry, host.name):
+        dest = host.skills / claim.dest_name
+        if not is_reparse_point(dest):
+            continue
+        if dry_run:
+            print(f"dry-run: shield {display_path(dest)}")
+            continue
+        remove_link(dest)
+
+
+def restore_foreign_skill_dests(
+    catalog: Catalog,
+    entry: SkillEntry,
+    host: Host,
+    *,
+    dry_run: bool,
+) -> None:
+    for claim in foreign_claims_for(catalog, entry, host.name):
+        dest = host.skills / claim.dest_name
+        if dry_run:
+            print(f"dry-run: restore {display_path(dest)}")
+            continue
+        if is_reparse_point(dest):
+            target = link_target(dest)
+            if target is not None and same_path(target, claim.source_dir):
+                continue
+            remove_link(dest)
+        elif dest.is_dir():
+            shutil.rmtree(dest)
+        elif dest.exists():
+            dest.unlink()
+        if claim.source_dir.is_dir():
+            create_link(claim.source_dir, dest)
+
+
 def apply_entry(
     entry: SkillEntry,
     hosts: dict[str, Host],
     *,
     dry_run: bool,
     force: bool,
+    catalog: Catalog | None = None,
 ) -> list[str]:
     actions: list[str] = []
     live = [h for h in entry.hosts if h in hosts]
@@ -1135,7 +1188,14 @@ def apply_entry(
             except FileNotFoundError as exc:
                 actions.append(f"{entry.name} {host_name}: {exc} FAIL")
                 continue
-            code = run_cmd(argv, cwd=entry.repo, dry_run=dry_run)
+            host = hosts[host_name]
+            if catalog is not None:
+                unlink_foreign_skill_links(catalog, entry, host, dry_run=dry_run)
+            try:
+                code = run_cmd(argv, cwd=entry.repo, dry_run=dry_run)
+            finally:
+                if catalog is not None:
+                    restore_foreign_skill_dests(catalog, entry, host, dry_run=dry_run)
             actions.append(f"{entry.name} {host_name}: exit {code}")
             if code != 0:
                 actions[-1] += " FAIL"
@@ -1169,7 +1229,9 @@ def apply_skills(
     for entry in catalog.skills:
         if only and entry.name != only and only not in dest_names(entry):
             continue
-        for line in apply_entry(entry, hosts, dry_run=dry_run, force=force):
+        for line in apply_entry(
+            entry, hosts, dry_run=dry_run, force=force, catalog=catalog
+        ):
             print(line)
             if line.endswith("FAIL") or ": missing " in line or line.endswith("real-dir"):
                 if line.endswith("real-dir"):
