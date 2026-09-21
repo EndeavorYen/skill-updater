@@ -1827,3 +1827,109 @@ def test_installer_dry_run_does_not_unlink_foreign_dest(tmp_path: Path, capsys) 
     assert dest_link.resolve() == checkout.resolve()
     assert "dry-run: shield" in out
     assert "dry-run: restore" in out
+
+
+@pytest.mark.skipif(os.name == "nt", reason="posix install.sh fixture")
+def test_installer_leaves_other_installer_real_dir_in_place(tmp_path: Path) -> None:
+    other_repo = tmp_path / "other-skill"
+    write_skill(other_repo, "other-src")
+    grok_skills = tmp_path / "grok-skills"
+    grok_skills.mkdir()
+    other_dest = grok_skills / "other-skill"
+    write_skill(other_dest, "other-copy")
+
+    (tmp_path / "awt" / "scripts").mkdir(parents=True)
+    (tmp_path / "awt" / "scripts" / "install.sh").write_text(
+        "#!/usr/bin/env bash\nexit 0\n", encoding="utf-8"
+    )
+    catalog = update.Catalog(
+        code_root=tmp_path,
+        plugin_hosts=(),
+        hosts={"grok": update.Host("grok", grok_skills)},
+        skills=(
+            update.SkillEntry(
+                name="agent-workflow-toolkit",
+                kind="installer",
+                repo=tmp_path / "awt",
+                hosts=("grok",),
+                dest_skills=("delta-presentation",),
+                install_sh="scripts/install.sh",
+            ),
+            update.SkillEntry(
+                name="other-skill",
+                kind="installer",
+                repo=other_repo,
+                hosts=("grok",),
+                dest_skills=("other-skill",),
+            ),
+        ),
+    )
+    lines = update.apply_entry(
+        catalog.skills[0],
+        catalog.hosts,
+        dry_run=False,
+        force=False,
+        catalog=catalog,
+    )
+    assert any(line.endswith("exit 0") for line in lines)
+    assert not other_dest.is_symlink()
+    assert (other_dest / "SKILL.md").read_text(encoding="utf-8") == "other-copy"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="posix install.sh fixture")
+def test_installer_restores_links_if_unlink_fails_midway(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    one = tmp_path / "one"
+    two = tmp_path / "two"
+    write_skill(one, "one")
+    write_skill(two, "two")
+    grok_skills = tmp_path / "grok-skills"
+    grok_skills.mkdir()
+    dest_one = grok_skills / "one"
+    dest_two = grok_skills / "two"
+    dest_one.symlink_to(one)
+    dest_two.symlink_to(two)
+    (tmp_path / "awt" / "scripts").mkdir(parents=True)
+    (tmp_path / "awt" / "scripts" / "install.sh").write_text(
+        "#!/usr/bin/env bash\nexit 0\n", encoding="utf-8"
+    )
+    catalog = update.Catalog(
+        code_root=tmp_path,
+        plugin_hosts=(),
+        hosts={"grok": update.Host("grok", grok_skills)},
+        skills=(
+            update.SkillEntry(
+                name="agent-workflow-toolkit",
+                kind="installer",
+                repo=tmp_path / "awt",
+                hosts=("grok",),
+                dest_skills=("delta-presentation",),
+                install_sh="scripts/install.sh",
+            ),
+            update.SkillEntry(name="one", kind="link", repo=one, hosts=("grok",)),
+            update.SkillEntry(name="two", kind="link", repo=two, hosts=("grok",)),
+        ),
+    )
+    real_remove = update.remove_link
+    seen: list[Path] = []
+
+    def boom(path: Path) -> None:
+        seen.append(path)
+        if len(seen) == 2:
+            raise OSError("boom")
+        real_remove(path)
+
+    monkeypatch.setattr(update, "remove_link", boom)
+    with pytest.raises(OSError, match="boom"):
+        update.apply_entry(
+            catalog.skills[0],
+            catalog.hosts,
+            dry_run=False,
+            force=False,
+            catalog=catalog,
+        )
+    assert dest_one.is_symlink()
+    assert dest_one.resolve() == one.resolve()
+    assert dest_two.is_symlink()
+    assert dest_two.resolve() == two.resolve()

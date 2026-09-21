@@ -1125,31 +1125,47 @@ def foreign_claims_for(
     ]
 
 
+def _rmtree(path: Path) -> None:
+    def _retry(func: Any, p: str, _exc: Any) -> None:
+        try:
+            os.chmod(p, stat.S_IWRITE)
+        except OSError:
+            pass
+        func(p)
+
+    shutil.rmtree(path, onerror=_retry)
+
+
 def unlink_foreign_skill_links(
     catalog: Catalog,
     entry: SkillEntry,
     host: Host,
     *,
     dry_run: bool,
+    touched: list[DestClaim],
 ) -> None:
     for claim in foreign_claims_for(catalog, entry, host.name):
+        if claim.method not in LINK_KINDS:
+            continue
         dest = host.skills / claim.dest_name
-        if not is_reparse_point(dest):
-            continue
-        if dry_run:
-            print(f"dry-run: shield {display_path(dest)}")
-            continue
-        remove_link(dest)
+        if is_reparse_point(dest):
+            if dry_run:
+                print(f"dry-run: shield {display_path(dest)}")
+                touched.append(claim)
+                continue
+            remove_link(dest)
+            touched.append(claim)
+        elif not dest.exists():
+            touched.append(claim)
 
 
 def restore_foreign_skill_dests(
-    catalog: Catalog,
-    entry: SkillEntry,
     host: Host,
     *,
     dry_run: bool,
+    claims: list[DestClaim],
 ) -> None:
-    for claim in foreign_claims_for(catalog, entry, host.name):
+    for claim in claims:
         dest = host.skills / claim.dest_name
         if dry_run:
             print(f"dry-run: restore {display_path(dest)}")
@@ -1160,7 +1176,7 @@ def restore_foreign_skill_dests(
                 continue
             remove_link(dest)
         elif dest.is_dir():
-            shutil.rmtree(dest)
+            _rmtree(dest)
         elif dest.exists():
             dest.unlink()
         if claim.source_dir.is_dir():
@@ -1189,13 +1205,15 @@ def apply_entry(
                 actions.append(f"{entry.name} {host_name}: {exc} FAIL")
                 continue
             host = hosts[host_name]
-            if catalog is not None:
-                unlink_foreign_skill_links(catalog, entry, host, dry_run=dry_run)
+            touched: list[DestClaim] = []
             try:
+                if catalog is not None:
+                    unlink_foreign_skill_links(
+                        catalog, entry, host, dry_run=dry_run, touched=touched
+                    )
                 code = run_cmd(argv, cwd=entry.repo, dry_run=dry_run)
             finally:
-                if catalog is not None:
-                    restore_foreign_skill_dests(catalog, entry, host, dry_run=dry_run)
+                restore_foreign_skill_dests(host, dry_run=dry_run, claims=touched)
             actions.append(f"{entry.name} {host_name}: exit {code}")
             if code != 0:
                 actions[-1] += " FAIL"
