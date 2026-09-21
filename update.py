@@ -43,6 +43,8 @@ State = Literal[
 ROOT = Path(__file__).resolve().parent
 CATALOG_NAME = "catalog.toml"
 LOCAL_CATALOG_NAME = "catalog.local.toml"
+OVERLAY_ENV_FILE = "UPDATE_HARNESS_LOCAL_CATALOG"
+OVERLAY_ENV_DIR = "UPDATE_HARNESS_CATALOG_DIR"
 
 
 @dataclass(frozen=True)
@@ -72,6 +74,7 @@ class Catalog:
     hosts: dict[str, Host]
     skills: tuple[SkillEntry, ...]
     source_dir: Path = ROOT
+    overlay_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -118,6 +121,35 @@ def expand_user_text(raw: str) -> str:
     if text.startswith("~/"):
         return str(home() / text[2:])
     return text
+
+
+def xdg_catalog_dir() -> Path:
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg:
+        return Path(expand_user_text(xdg)) / "update-harness"
+    return home() / ".config" / "update-harness"
+
+
+def overlay_catalog_path(*, repo_dir: Path) -> Path:
+    env_file = os.environ.get(OVERLAY_ENV_FILE)
+    if env_file:
+        return Path(expand_user_text(env_file))
+    env_dir = os.environ.get(OVERLAY_ENV_DIR)
+    if env_dir:
+        return Path(expand_user_text(env_dir)) / LOCAL_CATALOG_NAME
+    config_path = xdg_catalog_dir() / LOCAL_CATALOG_NAME
+    if config_path.is_file():
+        return config_path
+    repo_path = repo_dir / LOCAL_CATALOG_NAME
+    if repo_path.is_file():
+        return repo_path
+    return config_path
+
+
+def catalog_overlay_path(catalog: Catalog) -> Path:
+    if catalog.overlay_path is not None:
+        return catalog.overlay_path
+    return catalog.source_dir / LOCAL_CATALOG_NAME
 
 
 def resolve_code_root(data: dict[str, Any] | None = None) -> Path:
@@ -182,11 +214,17 @@ def load_catalog(
 ) -> Catalog:
     base = root or ROOT
     catalog_path = path or (base / CATALOG_NAME)
-    source_dir = catalog_path.parent if path is not None else base
+    if path is not None:
+        overlay_path = catalog_path.parent / LOCAL_CATALOG_NAME
+        source_dir = catalog_path.parent
+        merge_overlay = False
+    else:
+        overlay_path = overlay_catalog_path(repo_dir=base)
+        source_dir = overlay_path.parent
+        merge_overlay = True
     data = tomllib.loads(catalog_path.read_text(encoding="utf-8"))
-    local_path = source_dir / LOCAL_CATALOG_NAME
-    if path is None and local_path.is_file():
-        data = merge_catalog_data(data, tomllib.loads(local_path.read_text(encoding="utf-8")))
+    if merge_overlay and overlay_path.is_file():
+        data = merge_catalog_data(data, tomllib.loads(overlay_path.read_text(encoding="utf-8")))
     code_root = resolve_code_root(data)
     py = python or sys.executable
     hosts = {}
@@ -222,6 +260,7 @@ def load_catalog(
         hosts=hosts,
         skills=tuple(skills),
         source_dir=source_dir,
+        overlay_path=overlay_path,
     )
 
 
@@ -768,6 +807,7 @@ def write_overlay(
     if existing and not existing.endswith("\n"):
         existing += "\n"
     try:
+        local_catalog_path.parent.mkdir(parents=True, exist_ok=True)
         local_catalog_path.write_text(existing + "".join(blocks), encoding="utf-8")
     except OSError as exc:
         print(f"scan: skip write {local_catalog_path}: {exc}", file=sys.stderr)
@@ -823,7 +863,7 @@ def cmd_scan(
     for plugin in plugins:
         print(f"{plugin.host}\t{plugin.plugin_id}")
     if write:
-        overlay_path = catalog.source_dir / LOCAL_CATALOG_NAME
+        overlay_path = catalog_overlay_path(catalog)
         blocks = write_overlay(hits, overlay_path, catalog.code_root, dry_run=dry_run)
         if dry_run:
             for block in blocks:
@@ -975,7 +1015,20 @@ def which(cmd: str) -> str | None:
     return shutil.which(cmd)
 
 
-def run_cmd(argv: list[str], *, cwd: Path | None = None, dry_run: bool) -> int:
+def installer_env(host: Host) -> dict[str, str]:
+    env = os.environ.copy()
+    env["UPDATE_HARNESS_SKILLS"] = str(host.skills)
+    env["UPDATE_HARNESS_HOST"] = host.name
+    return env
+
+
+def run_cmd(
+    argv: list[str],
+    *,
+    cwd: Path | None = None,
+    dry_run: bool,
+    env: dict[str, str] | None = None,
+) -> int:
     printable = " ".join(argv)
     if cwd is not None:
         printable = f"(cd {cwd}) {printable}"
@@ -983,7 +1036,7 @@ def run_cmd(argv: list[str], *, cwd: Path | None = None, dry_run: bool) -> int:
         print(f"dry-run: {printable}")
         return 0
     print(f"$ {printable}")
-    completed = subprocess.run(argv, cwd=str(cwd) if cwd else None)
+    completed = subprocess.run(argv, cwd=str(cwd) if cwd else None, env=env)
     return completed.returncode
 
 
@@ -1211,7 +1264,9 @@ def apply_entry(
                     unlink_foreign_skill_links(
                         catalog, entry, host, dry_run=dry_run, touched=touched
                     )
-                code = run_cmd(argv, cwd=entry.repo, dry_run=dry_run)
+                code = run_cmd(
+                    argv, cwd=entry.repo, dry_run=dry_run, env=installer_env(host)
+                )
             finally:
                 restore_foreign_skill_dests(host, dry_run=dry_run, claims=touched)
             actions.append(f"{entry.name} {host_name}: exit {code}")
@@ -1339,7 +1394,7 @@ Commands:
   install-shim  Write ~/.local/bin/update-harness (.cmd on Windows).
 
 Quick Start:
-  update-harness scan --write   # Discover skills & initialize catalog.local.toml
+  update-harness scan --write   # Discover skills & initialize the overlay catalog
   update-harness pull           # Fast-forward catalog skill git repos
   update-harness all            # Update all skills and host plugins
   update-harness status         # Check synchronization health
@@ -1348,7 +1403,7 @@ Quick Start:
 
 
 def overlay_needs_scan_write(catalog: Catalog, hosts: dict[str, Host]) -> bool:
-    overlay = catalog.source_dir / LOCAL_CATALOG_NAME
+    overlay = catalog_overlay_path(catalog)
     if not overlay.is_file():
         return True
     try:
@@ -1401,6 +1456,7 @@ def cmd_status(catalog: Catalog, hosts: dict[str, Host], *, as_json: bool) -> in
         print(f"hosts: {', '.join(hosts) or '(none)'}")
         print(f"skills: {summary or '0'}")
         print(f"plugin hosts: {', '.join(catalog.plugin_hosts) or '(none)'}")
+        print(f"overlay: {display_path(catalog_overlay_path(catalog))}")
     bad = [r for r in rows if r.state not in ("ok",)]
     if bad and not as_json:
         print()
@@ -1458,7 +1514,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument(
         "--write",
         action="store_true",
-        help="append new skills to catalog.local.toml",
+        help="append new skills to the overlay catalog",
     )
     sub.add_parser("skills", parents=[common], help="Sync/link skill repos to all configured hosts.")
     sub.add_parser("plugins", parents=[common], help="Update host CLI plugins (grok, claude).")

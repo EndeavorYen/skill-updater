@@ -1,4 +1,5 @@
-# Copy rows you need into catalog.local.toml.
+# Copy rows you need into the overlay catalog
+# (~/.config/update-harness/catalog.local.toml).
 # Last row that names a dest_skill wins.
 
 # plugin_hosts = ["grok", "claude"]
@@ -11,7 +12,7 @@
 # install_ps1 = "scripts/install.ps1"
 # install_sh = "scripts/install.sh"
 # dest_skills = ["my-copy-skill"]
-# hosts = ["grok", "claude", "cursor"]
+# hosts = ["grok", "claude", "cursor", "gemini", "antigravity", "antigravity-cli"]
 
 # [[skills]]
 # name = "my-command-skill"
@@ -20,11 +21,11 @@
 # argv = ["{python}", "install.py"]
 # dest_skills = ["my-command-skill"]
 # source_skill_md = "skills/SKILL.md"
-# hosts = ["grok", "claude", "cursor", "codex"]
+# hosts = ["grok", "claude", "cursor", "codex", "gemini", "antigravity", "antigravity-cli"]
 
 # [[skills]]
 # name = "my-skill-pack"
 # kind = "link-pack"
 # repo = "{code_root}/my-skill-pack"
 # skills_dir = "skills"
-# hosts = ["grok", "claude", "cursor", "codex"]
+# hosts = ["grok", "claude", "cursor", "codex", "gemini", "antigravity", "antigravity-cli"]

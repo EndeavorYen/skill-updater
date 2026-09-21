@@ -10,6 +10,15 @@ import pytest
 import update
 
 
+@pytest.fixture(autouse=True)
+def isolate_overlay_lookup(monkeypatch, tmp_path_factory):
+    isolated = tmp_path_factory.mktemp("xdg-update-harness")
+    monkeypatch.setattr(update, "xdg_catalog_dir", lambda: isolated)
+    monkeypatch.delenv("UPDATE_HARNESS_LOCAL_CATALOG", raising=False)
+    monkeypatch.delenv("UPDATE_HARNESS_CATALOG_DIR", raising=False)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+
+
 def installer_entry(repo: Path) -> update.SkillEntry:
     (repo / "scripts").mkdir(parents=True, exist_ok=True)
     (repo / "scripts" / "install.ps1").write_text("# ps1\n", encoding="utf-8")
@@ -239,7 +248,35 @@ def test_shipped_catalog_is_generic() -> None:
     assert "workflow-ex" not in text
     assert "shuohao" not in text
     assert loaded.hosts["gemini"].skills == Path.home() / ".gemini" / "config" / "skills"
-    assert loaded.hosts["antigravity"].skills == Path.home() / ".gemini" / "config" / "skills"
+    assert loaded.hosts["antigravity"].skills == Path.home() / ".gemini" / "antigravity" / "skills"
+    assert loaded.hosts["antigravity-cli"].skills == (
+        Path.home() / ".gemini" / "antigravity-cli" / "skills"
+    )
+    assert loaded.skills[0].hosts[-3:] == ("gemini", "antigravity", "antigravity-cli")
+
+
+def test_apply_entry_links_antigravity_distinct_from_gemini(tmp_path: Path) -> None:
+    src = tmp_path / "demo-skill"
+    write_skill(src, "harness")
+    gemini = tmp_path / "gemini-skills"
+    antigravity = tmp_path / "antigravity-skills"
+    antigravity_cli = tmp_path / "antigravity-cli-skills"
+    hosts = {
+        "gemini": update.Host("gemini", gemini),
+        "antigravity": update.Host("antigravity", antigravity),
+        "antigravity-cli": update.Host("antigravity-cli", antigravity_cli),
+    }
+    entry = update.SkillEntry(
+        name="demo-skill",
+        kind="link",
+        repo=src,
+        hosts=("gemini", "antigravity", "antigravity-cli"),
+    )
+    actions = update.apply_entry(entry, hosts, dry_run=False, force=False)
+    assert all(line.endswith(": linked") for line in actions)
+    assert update.same_path(update.link_target(gemini / "demo-skill"), src)
+    assert update.same_path(update.link_target(antigravity / "demo-skill"), src)
+    assert update.same_path(update.link_target(antigravity_cli / "demo-skill"), src)
 
 
 def test_local_overlay_merges_after_shipped(tmp_path: Path) -> None:
@@ -269,6 +306,130 @@ hosts = ["grok"]
     )
     loaded = update.load_catalog(root=tmp_path)
     assert [s.name for s in loaded.skills] == ["update-harness", "extra"]
+    assert loaded.overlay_path == tmp_path / "catalog.local.toml"
+
+
+def test_overlay_env_file_wins_over_repo(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "catalog.toml").write_text(
+        """
+plugin_hosts = []
+[hosts.grok]
+skills = "~/.grok/skills"
+[[skills]]
+name = "update-harness"
+kind = "link"
+repo = "{code_root}/update-harness"
+hosts = ["grok"]
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "catalog.local.toml").write_text(
+        """
+[[skills]]
+name = "from-repo"
+kind = "link"
+repo = "{code_root}/from-repo"
+hosts = ["grok"]
+""",
+        encoding="utf-8",
+    )
+    env_file = tmp_path / "elsewhere" / "my-overlay.toml"
+    env_file.parent.mkdir()
+    env_file.write_text(
+        """
+[[skills]]
+name = "from-env"
+kind = "link"
+repo = "{code_root}/from-env"
+hosts = ["grok"]
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("UPDATE_HARNESS_LOCAL_CATALOG", str(env_file))
+    loaded = update.load_catalog(root=tmp_path)
+    assert [s.name for s in loaded.skills] == ["update-harness", "from-env"]
+    assert loaded.overlay_path == env_file
+
+
+def test_overlay_env_dir_wins_over_xdg(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "catalog.toml").write_text(
+        """
+plugin_hosts = []
+[hosts.grok]
+skills = "~/.grok/skills"
+""",
+        encoding="utf-8",
+    )
+    xdg = tmp_path / "xdg"
+    xdg_overlay = xdg / "catalog.local.toml"
+    xdg_overlay.parent.mkdir()
+    xdg_overlay.write_text(
+        '[[skills]]\nname = "from-xdg"\nkind = "link"\nrepo = "{code_root}/from-xdg"\n',
+        encoding="utf-8",
+    )
+    env_dir = tmp_path / "env-dir"
+    env_overlay = env_dir / "catalog.local.toml"
+    env_overlay.parent.mkdir()
+    env_overlay.write_text(
+        '[[skills]]\nname = "from-dir"\nkind = "link"\nrepo = "{code_root}/from-dir"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(update, "xdg_catalog_dir", lambda: xdg)
+    monkeypatch.setenv("UPDATE_HARNESS_CATALOG_DIR", str(env_dir))
+    loaded = update.load_catalog(root=tmp_path)
+    assert [s.name for s in loaded.skills] == ["from-dir"]
+    assert loaded.overlay_path == env_overlay
+
+
+def test_overlay_xdg_wins_over_repo(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "catalog.toml").write_text(
+        """
+plugin_hosts = []
+[hosts.grok]
+skills = "~/.grok/skills"
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "catalog.local.toml").write_text(
+        '[[skills]]\nname = "from-repo"\nkind = "link"\nrepo = "{code_root}/from-repo"\n',
+        encoding="utf-8",
+    )
+    xdg = tmp_path / "xdg"
+    xdg_overlay = xdg / "catalog.local.toml"
+    xdg_overlay.parent.mkdir()
+    xdg_overlay.write_text(
+        '[[skills]]\nname = "from-xdg"\nkind = "link"\nrepo = "{code_root}/from-xdg"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(update, "xdg_catalog_dir", lambda: xdg)
+    loaded = update.load_catalog(root=tmp_path)
+    assert [s.name for s in loaded.skills] == ["from-xdg"]
+    assert loaded.overlay_path == xdg_overlay
+
+
+def test_scan_write_creates_xdg_overlay(tmp_path: Path, monkeypatch) -> None:
+    xdg = tmp_path / "xdg"
+    monkeypatch.setattr(update, "xdg_catalog_dir", lambda: xdg)
+    code_root = tmp_path / "code"
+    grok = tmp_path / "grok-skills"
+    grok.mkdir()
+    write_skill(code_root / "fresh-skill", "x")
+    (tmp_path / "catalog.toml").write_text(
+        f"""
+plugin_hosts = []
+code_root = "{code_root.as_posix()}"
+[hosts.grok]
+skills = "{grok.as_posix()}"
+""",
+        encoding="utf-8",
+    )
+    loaded = update.load_catalog(root=tmp_path)
+    code = update.cmd_scan(loaded, loaded.hosts, write=True, dry_run=False)
+    assert code == 0
+    overlay = xdg / "catalog.local.toml"
+    assert overlay.is_file()
+    assert 'name = "fresh-skill"' in overlay.read_text(encoding="utf-8")
+    assert not (tmp_path / "catalog.local.toml").exists()
 
 
 def test_explicit_catalog_skips_overlay(tmp_path: Path) -> None:
@@ -351,6 +512,46 @@ def test_installer_argv_windows_prefers_ps1(tmp_path: Path, monkeypatch) -> None
     assert argv[0].endswith("powershell.exe")
     assert argv[-2].endswith("install.ps1")
     assert argv[-1] == "grok"
+
+
+def test_installer_env_sets_host_skills(tmp_path: Path) -> None:
+    host = update.Host("antigravity", tmp_path / "ag-skills")
+    env = update.installer_env(host)
+    assert env["UPDATE_HARNESS_HOST"] == "antigravity"
+    assert env["UPDATE_HARNESS_SKILLS"] == str(tmp_path / "ag-skills")
+
+
+def test_apply_entry_installer_passes_skills_env(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "scripts" / "install.ps1").write_text("# ps1\n", encoding="utf-8")
+    (repo / "scripts" / "install.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+    dest_root = tmp_path / "ag-skills"
+    dest_root.mkdir()
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, cwd=None, env=None):
+        captured["argv"] = argv
+        captured["env"] = env
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(update.subprocess, "run", fake_run)
+    monkeypatch.setattr(update, "which", lambda cmd: f"/bin/{cmd}" if cmd else None)
+    entry = update.SkillEntry(
+        name="demo",
+        kind="installer",
+        repo=repo,
+        hosts=("antigravity",),
+        install_ps1="scripts/install.ps1",
+        install_sh="scripts/install.sh",
+        dest_skills=("demo",),
+    )
+    hosts = {"antigravity": update.Host("antigravity", dest_root)}
+    actions = update.apply_entry(entry, hosts, dry_run=False, force=False)
+    assert actions == ["demo antigravity: exit 0"]
+    assert captured["env"]["UPDATE_HARNESS_HOST"] == "antigravity"
+    assert captured["env"]["UPDATE_HARNESS_SKILLS"] == str(dest_root)
+    assert captured["argv"][-1] == "antigravity"
 
 
 def test_installer_argv_posix_prefers_sh(tmp_path: Path, monkeypatch) -> None:
@@ -1093,7 +1294,7 @@ def test_parser_write_flag_is_scan_only() -> None:
     sub = next(a for a in parser._actions if getattr(a, "choices", None))
     scan_help = sub.choices["scan"].format_help()
     assert "--write" in scan_help
-    assert "catalog.local.toml" in scan_help
+    assert "overlay catalog" in scan_help
     with pytest.raises(SystemExit):
         parser.parse_args(["status", "--write"])
 
