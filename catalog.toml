@@ -1,5 +1,6 @@
 # Shipped catalog. No machine paths, no personal repos.
-# Your skill list belongs in catalog.local.toml (gitignored).
+# Your skill list belongs in the overlay catalog
+# (~/.config/update-harness/catalog.local.toml).
 # code_root defaults to the parent of this repo. Override with
 # UPDATE_HARNESS_CODE_ROOT or code_root = "{home}/Code"
 
@@ -21,10 +22,13 @@ skills = "~/.codex/skills"
 skills = "~/.gemini/config/skills"
 
 [hosts.antigravity]
-skills = "~/.gemini/config/skills"
+skills = "~/.gemini/antigravity/skills"
+
+[hosts.antigravity-cli]
+skills = "~/.gemini/antigravity-cli/skills"
 
 [[skills]]
 name = "update-harness"
 kind = "link"
 repo = "{root}"
-hosts = ["grok", "claude", "cursor", "codex", "gemini", "antigravity"]
+hosts = ["grok", "claude", "cursor", "codex", "gemini", "antigravity", "antigravity-cli"]

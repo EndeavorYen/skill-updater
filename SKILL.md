@@ -4,7 +4,7 @@ description: >
   update: refresh local skills and host plugins from catalog.toml.
   Use when the user says update skills, update plugins, update harness,
   pull skill repos, scan skills, scan plugins, sync skills to
-  grok/claude/cursor/codex, or runs /update-harness. Run the script.
+  grok/claude/cursor/codex/gemini/antigravity, or runs /update-harness. Run the script.
   Do not copy SKILL.md by hand. Do not rewrite skills.
 ---
 
@@ -40,5 +40,8 @@ git repos first unless `--no-pull`. `sync` is scan `--write` when the overlay
 is empty or new skills exist, then `all`.
 
 Print the script stdout. Stop. Do not open a knife. Personal skill rows go
-in `catalog.local.toml`. Do not put machine paths or private repos in
-`catalog.toml`.
+in the overlay catalog (`UPDATE_HARNESS_LOCAL_CATALOG`,
+`UPDATE_HARNESS_CATALOG_DIR/catalog.local.toml`, or
+`~/.config/update-harness/catalog.local.toml`). A checkout
+`catalog.local.toml` is still read if those files are missing. Do not put
+machine paths or private repos in shipped `catalog.toml`.

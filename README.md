@@ -20,7 +20,7 @@ Windows: `python` if there is no `python3`. `status` is the default. Exit 1 mean
 Any non-`--dry-run` command writes `~/.local/bin/update-harness` (`.cmd` on Windows), or run `install-shim` first. If that directory is on PATH:
 
 ```bash
-update-harness scan --write   # discover skills, create catalog.local.toml
+update-harness scan --write   # discover skills, create the overlay catalog
 update-harness pull           # fast-forward catalog skill git repos
 update-harness all            # pull, then link/install skills and update host plugins
 update-harness status         # check health
@@ -33,17 +33,26 @@ update-harness all --no-pull  # skip git pull (offline)
 
 | File | Role |
 | --- | --- |
-| `catalog.toml` | Shipped. Host skill dirs + this tool. No personal repos. |
-| `catalog.local.toml` | Your overlay. Gitignored. Last `dest_skill` row wins. |
+| `catalog.toml` | Shipped with the tool. Host skill dirs + this tool. No personal repos. |
+| overlay `catalog.local.toml` | Your skill list. Last `dest_skill` row wins. Lives outside the checkout. |
 | `catalog.example.toml` | Copy-paste rows for the overlay. |
 
-`code_root` defaults to the parent of this repo (sibling checkouts). Override with `UPDATE_HARNESS_CODE_ROOT` or `code_root = "{home}/Code"` in either catalog file. `--catalog PATH` loads that file only (no overlay).
+Overlay lookup, first match:
+
+1. `UPDATE_HARNESS_LOCAL_CATALOG` (file)
+2. `UPDATE_HARNESS_CATALOG_DIR/catalog.local.toml`
+3. `$XDG_CONFIG_HOME/update-harness/catalog.local.toml` or `~/.config/update-harness/catalog.local.toml` when that file exists
+4. `<tool>/catalog.local.toml` when that file exists (older checkouts)
+
+If none of those files exist, `scan --write` creates `~/.config/update-harness/catalog.local.toml` (or the env path). `status` prints the overlay path.
+
+`code_root` defaults to the parent of this repo (sibling checkouts). Override with `UPDATE_HARNESS_CODE_ROOT` or `code_root = "{home}/Code"` in either catalog file. `--catalog PATH` loads that file only (no overlay merge).
 
 Missing grok/claude CLIs are skipped, not a failure.
 
 ## Kinds
 
-- **installer** — Windows: `scripts/install.ps1`. macOS / Linux: `scripts/install.sh`. If only one file exists, that one runs (`pwsh` or Git Bash as fallback). Before the script runs, dests claimed as links by other catalog rows are unlinked so a copy cannot follow those links into a checkout; leftover copies on those dests are removed afterwards and the catalog links are restored. Real-directory dests owned by other installers are left in place. `status` treats dest `SKILL.md` as present or missing only; it does not hash against the local checkout, because installers often copy a GitHub clone rather than `{code_root}`.
+- **installer** — Windows: `scripts/install.ps1`. macOS / Linux: `scripts/install.sh`. If only one file exists, that one runs (`pwsh` or Git Bash as fallback). Each run gets `UPDATE_HARNESS_SKILLS` (that host's skills dir) and `UPDATE_HARNESS_HOST`. Before the script runs, dests claimed as links by other catalog rows are unlinked so a copy cannot follow those links into a checkout; leftover copies on those dests are removed afterwards and the catalog links are restored. Real-directory dests owned by other installers are left in place. `status` treats dest `SKILL.md` as present or missing only; it does not hash against the local checkout, because installers often copy a GitHub clone rather than `{code_root}`.
 - **command** — argv, `{python}` is `sys.executable`.
 - **link / link-pack** — Windows junction, macOS / Linux symlink. `junction` / `junction-pack` still parse.
 - **plugins** — `grok plugin update`; Claude marketplace update then each installed plugin.
@@ -57,4 +66,4 @@ Missing grok/claude CLIs are skipped, not a failure.
 - rewriting SKILL.md
 - deleting a real directory to make a link (`--force` renames it to `.bak` first)
 
-`scan` lists skills under `code_root` and live host skill dirs, plus installed grok/claude plugins. `--write` appends only **new** skill rows to `catalog.local.toml`. It does not rewrite shipped `catalog.toml`. Classification prefers `link-pack` (`skills/*/SKILL.md`) over `installer` / `command`, so a pack that also ships `scripts/install.sh` is linked, not executed with a host name. Git worktrees (`.git` is a file) under `code_root` are skipped. A checkout with only `<repo>/<repo>/SKILL.md` is a `link` whose `repo` is that nested directory. Shipped hosts include `gemini` / `antigravity` at `~/.gemini/config/skills`. For `installer` / `command` rows, `--write` sets `dest_skills` from the root `SKILL.md` frontmatter `name:` plus nested `*/SKILL.md` (and `skills/*/SKILL.md`) when those dest names are not just the repo directory name. `--write` does not rewrite an existing overlay row; delete that row or hand-edit `dest_skills`, then scan again. Later overlay rows still win dest claims.
+`scan` lists skills under `code_root` and live host skill dirs, plus installed grok/claude plugins. `--write` appends only **new** skill rows to the overlay catalog. It does not rewrite shipped `catalog.toml`. Classification prefers `link-pack` (`skills/*/SKILL.md`) over `installer` / `command`, so a pack that also ships `scripts/install.sh` is linked, not executed with a host name. Git worktrees (`.git` is a file) under `code_root` are skipped. A checkout with only `<repo>/<repo>/SKILL.md` is a `link` whose `repo` is that nested directory. Shipped hosts include `gemini` at `~/.gemini/config/skills`, `antigravity` at `~/.gemini/antigravity/skills`, and `antigravity-cli` at `~/.gemini/antigravity-cli/skills`. For `installer` / `command` rows, `--write` sets `dest_skills` from the root `SKILL.md` frontmatter `name:` plus nested `*/SKILL.md` (and `skills/*/SKILL.md`) when those dest names are not just the repo directory name. `--write` does not rewrite an existing overlay row; delete that row or hand-edit `dest_skills`, then scan again. Later overlay rows still win dest claims.
