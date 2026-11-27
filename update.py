@@ -67,6 +67,9 @@ class SkillEntry:
     argv: tuple[str, ...] = ()
     source_skill_md: str | None = None
     commands_dir: str | None = None
+    # False when an installer / command row sets dest_skills = []: it
+    # installs no skill dir (rules, hooks...), so status has nothing to check.
+    skill_dests: bool = True
 
 
 @dataclass(frozen=True)
@@ -260,6 +263,11 @@ def load_catalog(
                 argv=argv,
                 source_skill_md=raw.get("source_skill_md"),
                 commands_dir=raw.get("commands_dir"),
+                skill_dests=not (
+                    kind in ("installer", "command")
+                    and "dest_skills" in raw
+                    and not raw["dest_skills"]
+                ),
             )
         )
     return Catalog(
@@ -369,6 +377,8 @@ def dest_names(entry: SkillEntry) -> list[str]:
         return [entry.name]
     if entry.kind == "link-pack":
         return [p.name for p in pack_skill_dirs(entry)]
+    if not entry.skill_dests:
+        return []
     if entry.dest_skills:
         return list(entry.dest_skills)
     return [entry.name]
@@ -1422,6 +1432,11 @@ def claude_plugin_ids(payload: Any) -> list[str]:
     return ids
 
 
+# Built-in plugins ship inside the claude CLI; `claude plugin update` on
+# them fails with "not found" because no marketplace owns them.
+BUILTIN_PLUGIN_SUFFIX = "@builtin"
+
+
 def apply_plugins(catalog: Catalog, *, dry_run: bool) -> int:
     failed = 0
     for host_name in catalog.plugin_hosts:
@@ -1459,6 +1474,9 @@ def apply_plugins(catalog: Catalog, *, dry_run: bool) -> int:
                 failed += 1
                 continue
             ids = claude_plugin_ids(payload)
+            for plugin_id in [i for i in ids if i.endswith(BUILTIN_PLUGIN_SUFFIX)]:
+                print(f"skip claude plugin {plugin_id}: built in, updates with the CLI")
+            ids = [i for i in ids if not i.endswith(BUILTIN_PLUGIN_SUFFIX)]
             if not ids:
                 print("claude: no plugins listed")
                 continue
@@ -1632,6 +1650,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Child processes write straight to fd 1; without line buffering a
+    # piped or logged run shows our lines out of order with theirs.
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is not None:
+        reconfigure(line_buffering=True)
     args = build_parser().parse_args(argv)
     if args.command == "install-shim":
         if not args.dry_run:

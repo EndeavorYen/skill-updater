@@ -2245,3 +2245,62 @@ def test_apply_skills_fails_on_missing_commands_dir(tmp_path: Path, capsys) -> N
     )
     assert update.apply_skills(catalog, hosts, only=None, dry_run=False, force=False) == 1
     assert "missing commands dir" in capsys.readouterr().out
+
+
+def test_apply_plugins_skips_claude_builtin_plugins(monkeypatch, capsys) -> None:
+    listed = [
+        {"id": "pstack@cursor-plugins", "version": "1"},
+        {"id": "cc-plugin-privacy@builtin", "version": "unknown"},
+    ]
+    ran: list[list[str]] = []
+    monkeypatch.setattr(update, "which", lambda cmd: f"/bin/{cmd}" if cmd == "claude" else None)
+    monkeypatch.setattr(update, "run_cmd", lambda argv, **kw: ran.append(argv) or 0)
+    monkeypatch.setattr(
+        update.subprocess,
+        "run",
+        lambda argv, **kw: subprocess.CompletedProcess(argv, 0, json.dumps(listed), ""),
+    )
+    catalog = update.Catalog(code_root=Path("."), plugin_hosts=("claude",), hosts={}, skills=())
+
+    assert update.apply_plugins(catalog, dry_run=False) == 0
+
+    assert ["claude", "plugin", "update", "pstack@cursor-plugins"] in ran
+    assert not any("cc-plugin-privacy@builtin" in argv for argv in ran)
+    assert "skip claude plugin cc-plugin-privacy@builtin" in capsys.readouterr().out
+
+
+def test_installer_with_empty_dest_skills_has_no_status_rows(tmp_path: Path) -> None:
+    (tmp_path / "rules-only").mkdir()
+    (tmp_path / "rules-only" / "install.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    catalog_path = tmp_path / "catalog.toml"
+    catalog_path.write_text(
+        f"""
+code_root = "{tmp_path.as_posix()}"
+
+[hosts.claude]
+skills = "{(tmp_path / 'claude-skills').as_posix()}"
+
+[[skills]]
+name = "rules-only"
+kind = "installer"
+repo = "{{code_root}}/rules-only"
+install_sh = "install.sh"
+dest_skills = []
+
+[[skills]]
+name = "plain-installer"
+kind = "installer"
+repo = "{{code_root}}/plain-installer"
+""",
+        encoding="utf-8",
+    )
+    catalog = update.load_catalog(catalog_path)
+    rules_only, plain = catalog.skills
+    assert rules_only.skill_dests is False
+    assert update.dest_names(rules_only) == []
+    assert plain.skill_dests is True
+    assert update.dest_names(plain) == ["plain-installer"]
+    hosts = {"claude": catalog.hosts["claude"]}
+    owners = {row.owner for row in update.status_rows(catalog, hosts)}
+    assert "rules-only" not in owners
+    assert "plain-installer" in owners
