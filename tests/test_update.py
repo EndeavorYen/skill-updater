@@ -2134,3 +2134,173 @@ def test_installer_restores_links_if_unlink_fails_midway(
     assert dest_one.resolve() == one.resolve()
     assert dest_two.is_symlink()
     assert dest_two.resolve() == two.resolve()
+
+
+def command_entry(tmp_path: Path) -> tuple[update.SkillEntry, dict[str, update.Host]]:
+    repo = tmp_path / "cmd-skill"
+    write_skill(repo, "skill")
+    (repo / "prompts").mkdir()
+    (repo / "prompts" / "do-a.md").write_text("a v2\n", encoding="utf-8")
+    (repo / "prompts" / "do-b.md").write_text("b v1\n", encoding="utf-8")
+    (repo / "prompts" / "notes.txt").write_text("not a command\n", encoding="utf-8")
+    hosts = {
+        "claude": update.Host("claude", tmp_path / "claude" / "skills", tmp_path / "claude" / "commands"),
+        "cursor": update.Host("cursor", tmp_path / "cursor" / "skills"),
+    }
+    entry = update.SkillEntry(
+        name="cmd-skill",
+        kind="link",
+        repo=repo,
+        hosts=("claude", "cursor"),
+        commands_dir="prompts",
+    )
+    return entry, hosts
+
+
+def test_load_catalog_reads_commands(tmp_path: Path) -> None:
+    catalog = tmp_path / "catalog.toml"
+    catalog.write_text(
+        """
+[hosts.claude]
+skills = "~/.claude/skills"
+commands = "~/.claude/commands"
+
+[hosts.cursor]
+skills = "~/.cursor/skills"
+
+[[skills]]
+name = "cmd-skill"
+kind = "link"
+repo = "{code_root}/cmd-skill"
+commands_dir = "prompts"
+""",
+        encoding="utf-8",
+    )
+    loaded = update.load_catalog(catalog)
+    assert loaded.hosts["claude"].commands == Path.home() / ".claude" / "commands"
+    assert loaded.hosts["cursor"].commands is None
+    assert loaded.skills[0].commands_dir == "prompts"
+
+
+def test_apply_entry_copies_new_and_changed_commands(tmp_path: Path) -> None:
+    entry, hosts = command_entry(tmp_path)
+    cmds = hosts["claude"].commands
+    cmds.mkdir(parents=True)
+    (cmds / "do-a.md").write_text("a v1\n", encoding="utf-8")
+    (cmds / "mine.md").write_text("user command\n", encoding="utf-8")
+
+    actions = update.apply_entry(entry, hosts, dry_run=False, force=False)
+
+    assert "cmd-skill claude/commands/do-a.md: updated" in actions
+    assert "cmd-skill claude/commands/do-b.md: copied" in actions
+    assert not any("notes.txt" in line or "cursor/commands" in line for line in actions)
+    assert (cmds / "do-a.md").read_text(encoding="utf-8") == "a v2\n"
+    assert (cmds / "do-b.md").read_text(encoding="utf-8") == "b v1\n"
+    assert (cmds / "mine.md").read_text(encoding="utf-8") == "user command\n"
+    again = update.apply_entry(entry, hosts, dry_run=False, force=False)
+    assert "cmd-skill claude/commands/do-a.md: ok" in again
+
+
+def test_apply_entry_commands_dry_run_writes_nothing(tmp_path: Path) -> None:
+    entry, hosts = command_entry(tmp_path)
+    actions = update.apply_entry(entry, hosts, dry_run=True, force=False)
+    assert "cmd-skill claude/commands/do-b.md: would-copy" in actions
+    assert not hosts["claude"].commands.exists()
+
+
+def test_apply_entry_replaces_command_symlink_without_touching_target(tmp_path: Path) -> None:
+    entry, hosts = command_entry(tmp_path)
+    cmds = hosts["claude"].commands
+    cmds.mkdir(parents=True)
+    other = tmp_path / "other.md"
+    other.write_text("keep me\n", encoding="utf-8")
+    (cmds / "do-a.md").symlink_to(other)
+
+    update.apply_entry(entry, hosts, dry_run=False, force=False)
+
+    assert not (cmds / "do-a.md").is_symlink()
+    assert (cmds / "do-a.md").read_text(encoding="utf-8") == "a v2\n"
+    assert other.read_text(encoding="utf-8") == "keep me\n"
+
+
+def test_status_rows_report_command_drift(tmp_path: Path) -> None:
+    entry, hosts = command_entry(tmp_path)
+    cmds = hosts["claude"].commands
+    cmds.mkdir(parents=True)
+    (cmds / "do-a.md").write_text("a v1\n", encoding="utf-8")
+    catalog = update.Catalog(
+        code_root=tmp_path, plugin_hosts=(), hosts=hosts, skills=(entry,)
+    )
+    rows = {(r.host, r.dest): r for r in update.status_rows(catalog, hosts)}
+    assert rows[("claude", "commands/do-a.md")].state == "stale"
+    assert rows[("claude", "commands/do-b.md")].state == "missing"
+    assert not any(r.dest.startswith("commands/") for r in rows.values() if r.host == "cursor")
+
+
+def test_apply_skills_fails_on_missing_commands_dir(tmp_path: Path, capsys) -> None:
+    entry, hosts = command_entry(tmp_path)
+    entry = update.SkillEntry(**{**entry.__dict__, "commands_dir": "nope"})
+    catalog = update.Catalog(
+        code_root=tmp_path, plugin_hosts=(), hosts=hosts, skills=(entry,)
+    )
+    assert update.apply_skills(catalog, hosts, only=None, dry_run=False, force=False) == 1
+    assert "missing commands dir" in capsys.readouterr().out
+
+
+def test_apply_plugins_skips_claude_builtin_plugins(monkeypatch, capsys) -> None:
+    listed = [
+        {"id": "pstack@cursor-plugins", "version": "1"},
+        {"id": "cc-plugin-privacy@builtin", "version": "unknown"},
+    ]
+    ran: list[list[str]] = []
+    monkeypatch.setattr(update, "which", lambda cmd: f"/bin/{cmd}" if cmd == "claude" else None)
+    monkeypatch.setattr(update, "run_cmd", lambda argv, **kw: ran.append(argv) or 0)
+    monkeypatch.setattr(
+        update.subprocess,
+        "run",
+        lambda argv, **kw: subprocess.CompletedProcess(argv, 0, json.dumps(listed), ""),
+    )
+    catalog = update.Catalog(code_root=Path("."), plugin_hosts=("claude",), hosts={}, skills=())
+
+    assert update.apply_plugins(catalog, dry_run=False) == 0
+
+    assert ["claude", "plugin", "update", "pstack@cursor-plugins"] in ran
+    assert not any("cc-plugin-privacy@builtin" in argv for argv in ran)
+    assert "skip claude plugin cc-plugin-privacy@builtin" in capsys.readouterr().out
+
+
+def test_installer_with_empty_dest_skills_has_no_status_rows(tmp_path: Path) -> None:
+    (tmp_path / "rules-only").mkdir()
+    (tmp_path / "rules-only" / "install.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    catalog_path = tmp_path / "catalog.toml"
+    catalog_path.write_text(
+        f"""
+code_root = "{tmp_path.as_posix()}"
+
+[hosts.claude]
+skills = "{(tmp_path / 'claude-skills').as_posix()}"
+
+[[skills]]
+name = "rules-only"
+kind = "installer"
+repo = "{{code_root}}/rules-only"
+install_sh = "install.sh"
+dest_skills = []
+
+[[skills]]
+name = "plain-installer"
+kind = "installer"
+repo = "{{code_root}}/plain-installer"
+""",
+        encoding="utf-8",
+    )
+    catalog = update.load_catalog(catalog_path)
+    rules_only, plain = catalog.skills
+    assert rules_only.skill_dests is False
+    assert update.dest_names(rules_only) == []
+    assert plain.skill_dests is True
+    assert update.dest_names(plain) == ["plain-installer"]
+    hosts = {"claude": catalog.hosts["claude"]}
+    owners = {row.owner for row in update.status_rows(catalog, hosts)}
+    assert "rules-only" not in owners
+    assert "plain-installer" in owners

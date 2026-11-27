@@ -51,6 +51,7 @@ OVERLAY_ENV_DIR = "UPDATE_HARNESS_CATALOG_DIR"
 class Host:
     name: str
     skills: Path
+    commands: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,10 @@ class SkillEntry:
     skills_dir: str = "skills"
     argv: tuple[str, ...] = ()
     source_skill_md: str | None = None
+    commands_dir: str | None = None
+    # False when an installer / command row sets dest_skills = []: it
+    # installs no skill dir (rules, hooks...), so status has nothing to check.
+    skill_dests: bool = True
 
 
 @dataclass(frozen=True)
@@ -229,7 +234,12 @@ def load_catalog(
     py = python or sys.executable
     hosts = {}
     for name, spec in (data.get("hosts") or {}).items():
-        hosts[name] = Host(name=name, skills=host_skills_path(name, spec, code_root=code_root))
+        commands = spec.get("commands")
+        hosts[name] = Host(
+            name=name,
+            skills=host_skills_path(name, spec, code_root=code_root),
+            commands=expand_path(commands, code_root=code_root) if commands else None,
+        )
     skills: list[SkillEntry] = []
     for raw in data.get("skills") or []:
         kind = normalize_kind(raw["kind"])
@@ -252,6 +262,12 @@ def load_catalog(
                 skills_dir=raw.get("skills_dir") or "skills",
                 argv=argv,
                 source_skill_md=raw.get("source_skill_md"),
+                commands_dir=raw.get("commands_dir"),
+                skill_dests=not (
+                    kind in ("installer", "command")
+                    and "dest_skills" in raw
+                    and not raw["dest_skills"]
+                ),
             )
         )
     return Catalog(
@@ -361,6 +377,8 @@ def dest_names(entry: SkillEntry) -> list[str]:
         return [entry.name]
     if entry.kind == "link-pack":
         return [p.name for p in pack_skill_dirs(entry)]
+    if not entry.skill_dests:
+        return []
     if entry.dest_skills:
         return list(entry.dest_skills)
     return [entry.name]
@@ -972,8 +990,45 @@ def classify(claim: DestClaim, hosts: dict[str, Host]) -> Row:
     return Row(claim.host, claim.dest_name, claim.owner, method, "stale", "SKILL.md differs")
 
 
+def command_files(entry: SkillEntry) -> list[Path]:
+    if not entry.commands_dir:
+        return []
+    root = entry.repo / entry.commands_dir
+    if not root.is_dir():
+        return []
+    return sorted(p for p in root.glob("*.md") if p.is_file())
+
+
+def command_rows(catalog: Catalog, hosts: dict[str, Host]) -> list[Row]:
+    rows: list[Row] = []
+    for entry in catalog.skills:
+        if not entry.commands_dir:
+            continue
+        files = command_files(entry)
+        for host_name in entry.hosts:
+            host = hosts.get(host_name)
+            if host is None or host.commands is None:
+                continue
+            if not files:
+                root = entry.repo / entry.commands_dir
+                rows.append(Row(host_name, "commands/", entry.name, "copy-cmd", "missing-src", str(root)))
+                continue
+            for src in files:
+                dest = host.commands / src.name
+                state: State
+                if not dest.is_file():
+                    state = "missing"
+                elif sha256_file(dest) == sha256_file(src):
+                    state = "ok"
+                else:
+                    state = "stale"
+                rows.append(Row(host_name, f"commands/{src.name}", entry.name, "copy-cmd", state))
+    return rows
+
+
 def status_rows(catalog: Catalog, hosts: dict[str, Host]) -> list[Row]:
     rows = [classify(claim, hosts) for claim in claims_for(catalog, hosts)]
+    rows.extend(command_rows(catalog, hosts))
     rows.sort(key=lambda r: (r.host, r.owner, r.dest))
     return rows
 
@@ -1236,7 +1291,56 @@ def restore_foreign_skill_dests(
             create_link(claim.source_dir, dest)
 
 
+def ensure_command_copy(src: Path, dest: Path, *, dry_run: bool) -> str:
+    # Copies, not links: Windows file symlinks need Developer Mode.
+    if dest.is_file() and not is_reparse_point(dest) and sha256_file(dest) == sha256_file(src):
+        return "ok"
+    existed = dest.exists() or is_reparse_point(dest)
+    if dry_run:
+        return "would-update" if existed else "would-copy"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if is_reparse_point(dest):
+        # Writing through a symlink would clobber its target.
+        remove_link(dest)
+    shutil.copyfile(src, dest)
+    return "updated" if existed else "copied"
+
+
+def sync_commands(
+    entry: SkillEntry, hosts: dict[str, Host], *, dry_run: bool
+) -> list[str]:
+    targets = [
+        hosts[h] for h in entry.hosts if h in hosts and hosts[h].commands is not None
+    ]
+    if not entry.commands_dir or not targets or not entry.repo.exists():
+        return []
+    files = command_files(entry)
+    if not files:
+        return [f"{entry.name}: missing commands dir {entry.repo / entry.commands_dir}"]
+    actions: list[str] = []
+    for host in targets:
+        assert host.commands is not None
+        for src in files:
+            result = ensure_command_copy(src, host.commands / src.name, dry_run=dry_run)
+            actions.append(f"{entry.name} {host.name}/commands/{src.name}: {result}")
+    return actions
+
+
 def apply_entry(
+    entry: SkillEntry,
+    hosts: dict[str, Host],
+    *,
+    dry_run: bool,
+    force: bool,
+    catalog: Catalog | None = None,
+) -> list[str]:
+    actions = _apply_entry_skills(
+        entry, hosts, dry_run=dry_run, force=force, catalog=catalog
+    )
+    return actions + sync_commands(entry, hosts, dry_run=dry_run)
+
+
+def _apply_entry_skills(
     entry: SkillEntry,
     hosts: dict[str, Host],
     *,
@@ -1328,6 +1432,11 @@ def claude_plugin_ids(payload: Any) -> list[str]:
     return ids
 
 
+# Built-in plugins ship inside the claude CLI; `claude plugin update` on
+# them fails with "not found" because no marketplace owns them.
+BUILTIN_PLUGIN_SUFFIX = "@builtin"
+
+
 def apply_plugins(catalog: Catalog, *, dry_run: bool) -> int:
     failed = 0
     for host_name in catalog.plugin_hosts:
@@ -1365,6 +1474,9 @@ def apply_plugins(catalog: Catalog, *, dry_run: bool) -> int:
                 failed += 1
                 continue
             ids = claude_plugin_ids(payload)
+            for plugin_id in [i for i in ids if i.endswith(BUILTIN_PLUGIN_SUFFIX)]:
+                print(f"skip claude plugin {plugin_id}: built in, updates with the CLI")
+            ids = [i for i in ids if not i.endswith(BUILTIN_PLUGIN_SUFFIX)]
             if not ids:
                 print("claude: no plugins listed")
                 continue
@@ -1538,6 +1650,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Child processes write straight to fd 1; without line buffering a
+    # piped or logged run shows our lines out of order with theirs.
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is not None:
+        reconfigure(line_buffering=True)
     args = build_parser().parse_args(argv)
     if args.command == "install-shim":
         if not args.dry_run:
