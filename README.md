@@ -56,6 +56,7 @@ Missing grok/claude CLIs are skipped, not a failure.
 - **command** — argv, `{python}` is `sys.executable`.
 - **link / link-pack** — Windows junction, macOS / Linux symlink. `junction` / `junction-pack` still parse.
 - **plugins** — `grok plugin update`; Claude marketplace update then each installed plugin.
+- **commands** — a row with `commands_dir = "prompts"` copies that dir's `*.md` into the `commands` dir of each of its hosts that sets one (shipped: `grok` `~/.grok/commands`, `claude` `~/.claude/commands`). This runs for any kind, after the skill step. Files are copied, not linked, so they work on Windows without Developer Mode; a symlink in the way is replaced, never written through. Command files that are not in the repo are left alone. `status` lists each one as `copy-cmd` and reports `ok`, `stale`, or `missing` by hash.
 
 `GROK_HOME` / `HERMES_HOME` win over `~/.grok` / `~/.hermes` when set.
 

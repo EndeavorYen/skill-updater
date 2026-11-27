@@ -8,9 +8,11 @@ plugin_hosts = ["grok", "claude"]
 
 [hosts.grok]
 skills = "~/.grok/skills"
+commands = "~/.grok/commands"
 
 [hosts.claude]
 skills = "~/.claude/skills"
+commands = "~/.claude/commands"
 
 [hosts.cursor]
 skills = "~/.cursor/skills"
