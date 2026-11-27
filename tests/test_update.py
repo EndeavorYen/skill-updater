@@ -2304,3 +2304,35 @@ repo = "{{code_root}}/plain-installer"
     owners = {row.owner for row in update.status_rows(catalog, hosts)}
     assert "rules-only" not in owners
     assert "plain-installer" in owners
+
+
+def test_link_pack_exclude_skills_drops_dest(tmp_path: Path) -> None:
+    pack = tmp_path / "pack"
+    for name in ("keep-me", "old-alias"):
+        write_skill(pack / "skills" / name, name)
+    catalog_path = tmp_path / "catalog.toml"
+    catalog_path.write_text(
+        f"""
+code_root = "{tmp_path.as_posix()}"
+
+[hosts.claude]
+skills = "{(tmp_path / 'claude-skills').as_posix()}"
+
+[[skills]]
+name = "pack"
+kind = "link-pack"
+repo = "{{code_root}}/pack"
+exclude_skills = ["old-alias"]
+""",
+        encoding="utf-8",
+    )
+    catalog = update.load_catalog(catalog_path)
+    (entry,) = catalog.skills
+    assert entry.exclude_skills == ("old-alias",)
+    assert update.dest_names(entry) == ["keep-me"]
+    hosts = {"claude": catalog.hosts["claude"]}
+    actions = update.apply_entry(entry, hosts, dry_run=False, force=False)
+    assert actions == ["pack claude/keep-me: linked"]
+    assert not (tmp_path / "claude-skills" / "old-alias").exists()
+    dests = {row.dest for row in update.status_rows(catalog, hosts)}
+    assert dests == {"keep-me"}
