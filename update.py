@@ -70,6 +70,8 @@ class SkillEntry:
     # False when an installer / command row sets dest_skills = []: it
     # installs no skill dir (rules, hooks...), so status has nothing to check.
     skill_dests: bool = True
+    # link-pack only: skill dir names under skills_dir that are not linked.
+    exclude_skills: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -260,6 +262,7 @@ def load_catalog(
                 install_sh=raw.get("install_sh"),
                 dest_skills=tuple(raw.get("dest_skills") or ()),
                 skills_dir=raw.get("skills_dir") or "skills",
+                exclude_skills=tuple(raw.get("exclude_skills") or ()),
                 argv=argv,
                 source_skill_md=raw.get("source_skill_md"),
                 commands_dir=raw.get("commands_dir"),
@@ -346,6 +349,8 @@ def pack_skill_dirs(entry: SkillEntry) -> list[Path]:
         return []
     found: list[Path] = []
     for child in sorted(root.iterdir()):
+        if child.name in entry.exclude_skills:
+            continue
         if child.is_dir() and (child / "SKILL.md").is_file():
             found.append(child)
     return found
